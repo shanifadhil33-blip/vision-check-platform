@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+/*
+ * AGENTS.md rule 4: no CSS physical units anywhere. No mm, cm, in, pt.
+ * Every physical size in this application is computed from the stored
+ * calibration value and applied in pixels.
+ */
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+html,
+body {
+  height: 100%;
+}

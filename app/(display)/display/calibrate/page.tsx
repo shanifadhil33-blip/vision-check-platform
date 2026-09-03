@@ -9,6 +9,10 @@ export default function CalibratePage() {
           Every physical size in this application comes from this step. Match a bank card to the
           outline, then check the result with a ruler.
         </p>
+        <p className="mt-3 text-sm text-neutral-500">
+          Best viewed in Chrome, Edge, Safari or Firefox at 100% zoom. Press Ctrl+0 (Cmd+0 on Mac)
+          to reset zoom before calibrating.
+        </p>
       </header>
       <CalibrateFlow />
     </main>

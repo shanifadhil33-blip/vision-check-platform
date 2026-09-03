@@ -1,7 +1,32 @@
+"use client";
+
+import Link from "next/link";
+import { useCalibration } from "./calibrate/useCalibration";
+
 export default function DisplayPage() {
+  const { ready, calibration, validity } = useCalibration();
+
+  let statusLine = "Checking calibration…";
+  if (ready) {
+    if (calibration === null) {
+      statusLine = "No calibration yet.";
+    } else if (validity?.ok) {
+      statusLine = `Valid calibration · ${calibration.cssPxPerMm.toFixed(2)} CSS px per mm.`;
+    } else {
+      statusLine = `Calibration stored but not valid on this display${validity ? `: ${validity.reason}` : "."}`;
+    }
+  }
+
   return (
-    <main className="flex flex-1 items-center justify-center px-6 text-center">
-      <p className="text-neutral-400">Display surface. Not implemented yet.</p>
+    <main className="mx-auto flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
+      <h1 className="text-2xl font-semibold text-neutral-100">Display</h1>
+      <p className="max-w-md text-neutral-400">{statusLine}</p>
+      <Link
+        href="/display/calibrate"
+        className="text-sky-400 underline underline-offset-4 hover:text-sky-300"
+      >
+        /display/calibrate
+      </Link>
     </main>
   );
 }

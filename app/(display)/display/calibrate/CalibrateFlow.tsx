@@ -67,10 +67,14 @@ export function CalibrateFlow() {
         <button
           type="button"
           onClick={() => setIsRecalibrating(true)}
-          className="mt-2 text-sky-400 underline underline-offset-4 hover:text-sky-300"
+          className="mt-3 rounded border border-neutral-600 px-4 py-2 text-neutral-200 hover:border-neutral-400"
         >
-          Recalibrate
+          Match card again
         </button>
+        <p className="mt-2 text-sm text-neutral-500">
+          Calibration is saved per browser. Match the card again if you move to a different
+          screen.
+        </p>
       </div>
       <VerifyStep
         calibration={calibration}

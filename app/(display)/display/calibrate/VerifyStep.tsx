@@ -204,7 +204,7 @@ export function VerifyStep({ calibration, onVerified, onRecalibrate }: VerifySte
             onClick={onRecalibrate}
             className="rounded border border-neutral-600 px-4 py-2 text-neutral-200 hover:border-neutral-400"
           >
-            Recalibrate
+            Match card again
           </button>
           <button
             type="button"

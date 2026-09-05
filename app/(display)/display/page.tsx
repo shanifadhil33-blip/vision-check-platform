@@ -27,6 +27,12 @@ export default function DisplayPage() {
       >
         /display/calibrate
       </Link>
+      <Link
+        href="/display/optotype"
+        className="text-sky-400 underline underline-offset-4 hover:text-sky-300"
+      >
+        /display/optotype
+      </Link>
     </main>
   );
 }

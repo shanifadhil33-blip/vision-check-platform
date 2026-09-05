@@ -33,6 +33,12 @@ export default function DisplayPage() {
       >
         /display/optotype
       </Link>
+      <Link
+        href="/display/range"
+        className="text-sky-400 underline underline-offset-4 hover:text-sky-300"
+      >
+        /display/range
+      </Link>
     </main>
   );
 }

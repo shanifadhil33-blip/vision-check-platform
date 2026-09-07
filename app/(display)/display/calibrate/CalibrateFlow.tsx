@@ -1,9 +1,35 @@
 "use client";
 
 import { useState } from "react";
+import { pixelPitchMm, screenPhysicalSizeMm } from "@/lib/calibration";
 import { CardMatcher } from "./CardMatcher";
 import { useCalibration } from "./useCalibration";
 import { VerifyStep } from "./VerifyStep";
+
+function diagnosticsLine(input: {
+  devicePixelRatio: number;
+  cssPxPerMm: number;
+  cardWidthCssPx: number;
+  screenWidthCssPx: number;
+  screenHeightCssPx: number;
+  viewportWidthCssPx: number;
+  viewportHeightCssPx: number;
+}): string {
+  const pitchMm = pixelPitchMm(input.cssPxPerMm, input.devicePixelRatio);
+  const screenSize = screenPhysicalSizeMm(
+    input.screenWidthCssPx,
+    input.screenHeightCssPx,
+    input.cssPxPerMm,
+  );
+  return [
+    `DPR ${input.devicePixelRatio}`,
+    `${input.cssPxPerMm.toFixed(4)} CSS px/mm`,
+    `pitch ${pitchMm.toFixed(4)} mm`,
+    `card ${input.cardWidthCssPx.toFixed(1)} CSS px`,
+    `screen ${screenSize.widthMm.toFixed(0)}×${screenSize.heightMm.toFixed(0)} mm (${screenSize.diagonalInches.toFixed(1)} in)`,
+    `viewport ${input.viewportWidthCssPx}×${input.viewportHeightCssPx} CSS px`,
+  ].join(" · ");
+}
 
 export function CalibrateFlow() {
   const { ready, calibration, deviceContext, validity, save, addVerification } =
@@ -63,6 +89,9 @@ export function CalibrateFlow() {
         <p>
           Valid calibration · {calibration.cssPxPerMm.toFixed(2)} CSS px per mm · saved{" "}
           {calibration.createdAtIso}
+        </p>
+        <p className="mt-1 font-mono text-xs text-neutral-500">
+          {diagnosticsLine(calibration)}
         </p>
         <button
           type="button"

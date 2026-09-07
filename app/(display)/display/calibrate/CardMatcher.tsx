@@ -177,6 +177,16 @@ export function CardMatcher({ deviceContext, onConfirm, onCancel }: CardMatcherP
           screen {screenSize.widthMm.toFixed(0)} × {screenSize.heightMm.toFixed(0)} mm (
           {screenSize.diagonalInches.toFixed(1)} in diagonal)
         </p>
+        <p className="font-mono text-xs text-neutral-500">
+          {[
+            `DPR ${deviceContext.devicePixelRatio}`,
+            `${cssPxPerMm.toFixed(4)} CSS px/mm`,
+            `pitch ${pitchMm.toFixed(4)} mm`,
+            `card ${clampedCardWidthCssPx.toFixed(1)} CSS px`,
+            `screen ${screenSize.widthMm.toFixed(0)}×${screenSize.heightMm.toFixed(0)} mm (${screenSize.diagonalInches.toFixed(1)} in)`,
+            `viewport ${deviceContext.viewportWidthCssPx}×${deviceContext.viewportHeightCssPx} CSS px`,
+          ].join(" · ")}
+        </p>
         {!plausibility.ok ? (
           <p className="text-sm text-amber-300" role="status">
             Check the card edges carefully. {plausibility.reason}

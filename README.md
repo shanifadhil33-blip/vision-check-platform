@@ -17,19 +17,9 @@ cp .env.example .env.local   # then fill in the three Supabase values
 npm run dev
 ```
 
-Open <http://localhost:3000/api/health>. It should return `ok: true` with a row from Postgres.
-
 ## Database
 
-The schema is owned by the numbered migrations under [`supabase/migrations`](./supabase/migrations). Nothing is ever changed through the Supabase dashboard.
-
-```bash
-npx supabase login
-npx supabase link --project-ref <project-ref>
-npm run db:new -- <name>     # create a migration
-npm run db:push              # apply pending migrations
-npm run db:types             # regenerate lib/db/types.ts
-```
+Every database change is a SQL file. Write two copies: [`supabase/migrations`](./supabase/migrations) is the git record and is never executed; [`supabase/ops`](./supabase/ops) is the apply copy (same body plus tracking registration, wrapped in `BEGIN`/`COMMIT`) and is the only one that runs. A human reviews both, then pastes only the ops copy into the Supabase SQL editor. The Supabase CLI is never used. Never change the schema through the dashboard. Types in [`lib/db/types.ts`](./lib/db/types.ts) are written by hand to match the migration files; they are never generated from a live schema.
 
 ## Before committing
 

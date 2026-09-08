@@ -1,0 +1,14 @@
+# Ops SQL
+
+A human pastes every file by hand into the Supabase SQL editor. The Supabase CLI is never used.
+
+Files under `supabase/migrations` are the git record and are never executed. The apply copy under this directory is the only schema file that runs.
+
+## Run order
+
+1. Paste `20260908120000_vcp_initial_schema.preflight.sql`. Read the verdict. Continue only if it is `SAFE TO APPLY`.
+2. Paste `20260908120000_vcp_initial_schema.apply.sql`.
+3. Paste `20260908120000_vcp_initial_schema.verify.sql`. Read the verdict. Continue only if it is `MIGRATION VERIFIED`.
+4. Paste `fingerprint.sql`. Record the baseline.
+
+`20260908120000_vcp_initial_schema.rollback.sql` is emergency only. It destroys all data in schema `vcp`.

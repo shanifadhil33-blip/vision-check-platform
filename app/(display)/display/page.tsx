@@ -39,6 +39,12 @@ export default function DisplayPage() {
       >
         /display/range
       </Link>
+      <Link
+        href="/display/session"
+        className="text-sky-400 underline underline-offset-4 hover:text-sky-300"
+      >
+        Session test
+      </Link>
     </main>
   );
 }

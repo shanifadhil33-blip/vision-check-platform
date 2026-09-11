@@ -26,7 +26,7 @@
 - Rule 2 is enforced by process. Write the SQL under `/supabase/migrations` as the git record. Write the ops apply copy under `/supabase/ops` with the same body plus tracking registration, wrapped in BEGIN/COMMIT. A human reviews both, then pastes and runs only the ops copy in the Supabase SQL editor. The Supabase CLI is never used. Never edit a migration that has already been applied; add a new one.
 - Rule 3 and rule 4 are enforced by review. There is no lint rule for them. Reject any variable name that carries a physical quantity without its unit suffix, and any stylesheet or inline style using `mm`, `cm`, `in` or `pt`.
 - Rule 5 is enforced by omission. There is no auth dependency and no `auth` schema usage. The Supabase clients are created with session persistence disabled.
-- Rule 6 is enforced by omission and by lint. There is no service-role client and no SUPABASE_SERVICE_ROLE_KEY anywhere in the repo. lib/db contains only the anon-key browser client.
+- Rule 6 is enforced by omission and by lint. There is no service-role client and no SUPABASE_SERVICE_ROLE_KEY anywhere in the repo. lib/db contains the anon-key browser client, hand-written types and typed RPC wrappers. Nothing in the repo holds a service-role key.
 
 ## Folder structure
 
@@ -36,11 +36,11 @@ AGENTS.md                  this file
 /app
   /(display)               views rendered on the laptop or monitor
   /(remote)                views rendered on the phone
-  /api                     route handlers
 /lib
   /acuity                  pure functions, no React, no DOM, no browser APIs
   /calibration             pure functions, same rule
   /db                      Supabase client and typed queries
+  /session                 browser session store built on lib/db
 /supabase
   /migrations              git record, never executed
   /ops                     apply copies, the only files that are ever run

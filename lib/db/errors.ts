@@ -26,6 +26,7 @@ export type VcpErrorKind =
   | "unexpected-shape"
   | "no-session"
   | "busy"
+  | "stale-read"
   | "unknown";
 
 export type VcpError = {
@@ -155,4 +156,13 @@ export function noSessionError(): VcpError {
 
 export function busyError(): VcpError {
   return makeError("busy", null, null, "A pair or set-state call is already in flight");
+}
+
+export function staleReadError(): VcpError {
+  return makeError(
+    "stale-read",
+    null,
+    null,
+    "Loaded session version is older than the store; discarded",
+  );
 }

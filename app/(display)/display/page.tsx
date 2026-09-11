@@ -45,6 +45,12 @@ export default function DisplayPage() {
       >
         Session test
       </Link>
+      <Link
+        href="/display/test"
+        className="text-sky-400 underline underline-offset-4 hover:text-sky-300"
+      >
+        Two-device test
+      </Link>
     </main>
   );
 }

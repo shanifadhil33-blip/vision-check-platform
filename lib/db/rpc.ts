@@ -189,3 +189,20 @@ export async function submitResponse(args: {
     "vcp_submit_response returned an unexpected shape",
   );
 }
+
+export async function appendEvent(args: {
+  sessionId: string;
+  type: string;
+  payload: Json;
+}): Promise<RpcResult<string>> {
+  return callRpc(
+    () =>
+      getSupabaseBrowserClient().rpc("vcp_append_event", {
+        p_session_id: args.sessionId,
+        p_type: args.type,
+        p_payload: args.payload,
+      }),
+    parseUuid,
+    "vcp_append_event returned an unexpected shape",
+  );
+}

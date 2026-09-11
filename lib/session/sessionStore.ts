@@ -2,10 +2,12 @@ import type { Calibration } from "@/lib/calibration";
 import {
   busyError,
   noSessionError,
+  staleReadError,
   type VcpError,
 } from "@/lib/db/errors";
 import type { Json } from "@/lib/db/types";
 import {
+  appendEvent as rpcAppendEvent,
   attachCalibration as rpcAttachCalibration,
   createSession as rpcCreateSession,
   getSession as rpcGetSession,
@@ -140,6 +142,13 @@ export async function loadSession(sessionId: string): Promise<RpcResult<SessionV
     return loaded;
   }
   const sameId = cachedSnapshot.sessionId === loaded.data.id;
+  if (
+    sameId &&
+    cachedSnapshot.version !== null &&
+    loaded.data.version < cachedSnapshot.version
+  ) {
+    return { ok: false, error: staleReadError() };
+  }
   if (sameId) {
     adoptSessionView(loaded.data);
   } else {
@@ -269,6 +278,31 @@ export async function recordPresentation(
   const result = await rpcRecordPresentation({
     sessionId,
     presentation: payload,
+  });
+  if (!result.ok) {
+    setLastError(result.error);
+    return result;
+  }
+
+  patch({ lastError: null });
+  return result;
+}
+
+export async function appendEvent(args: {
+  type: string;
+  payload: Json;
+}): Promise<RpcResult<string>> {
+  const sessionId = cachedSnapshot.sessionId;
+  if (sessionId === null) {
+    const error = noSessionError();
+    setLastError(error);
+    return { ok: false, error };
+  }
+
+  const result = await rpcAppendEvent({
+    sessionId,
+    type: args.type,
+    payload: args.payload,
   });
   if (!result.ok) {
     setLastError(result.error);

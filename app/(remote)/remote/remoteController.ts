@@ -27,6 +27,12 @@ export type RemoteSnapshot = {
   trialIndex: number | null;
   errorMessage: string | null;
   choiceLocked: boolean;
+  /** True once the phone has shown at least one choice set. */
+  everSawTrial: boolean;
+  /** Label for the last confirmed answer ("N" or "Not sure"); never right/wrong. */
+  lastSentLabel: string | null;
+  /** Immediate tap highlight while sending. */
+  selectedChoice: ResponseChoice | null;
 };
 
 const POLL_MS = 3000;
@@ -39,7 +45,17 @@ const SERVER_SNAPSHOT: RemoteSnapshot = {
   trialIndex: null,
   errorMessage: null,
   choiceLocked: false,
+  everSawTrial: false,
+  lastSentLabel: null,
+  selectedChoice: null,
 };
+
+function sentLabel(choice: ResponseChoice): string {
+  if (choice.kind === "not_sure") {
+    return "Not sure";
+  }
+  return choice.letter;
+}
 
 const listeners = new Set<() => void>();
 let cachedSnapshot: RemoteSnapshot = SERVER_SNAPSHOT;
@@ -128,6 +144,9 @@ function applyLoopState(state: LoopState | null, status: string | null): void {
         trialIndex: state.trialIndex,
         choiceLocked: false,
         errorMessage: null,
+        everSawTrial: true,
+        lastSentLabel: null,
+        selectedChoice: null,
       });
     }
     return;
@@ -354,7 +373,7 @@ export async function answer(choice: ResponseChoice): Promise<void> {
   }
 
   answerInFlight = true;
-  patch({ choiceLocked: true });
+  patch({ choiceLocked: true, selectedChoice: choice });
 
   try {
     let sentEntry = existing !== undefined && existing.state === "sent" ? existing : null;
@@ -422,6 +441,8 @@ export async function answer(choice: ResponseChoice): Promise<void> {
       choiceLocked: true,
       errorMessage: null,
       choices: [],
+      lastSentLabel: sentLabel(sentEntry.choice),
+      selectedChoice: null,
     });
   } finally {
     answerInFlight = false;

@@ -19,6 +19,31 @@ type Props = {
   sessionId: string | null;
 };
 
+function choiceButtonClass(
+  selected: boolean,
+  dimOthers: boolean,
+  variant: "letter" | "not_sure",
+): string {
+  const base =
+    "min-h-16 rounded-lg text-3xl font-semibold transition-colors disabled:cursor-not-allowed";
+  if (variant === "not_sure") {
+    if (selected) {
+      return `${base} border-2 border-sky-400 bg-neutral-800 text-xl font-medium text-neutral-100`;
+    }
+    if (dimOthers) {
+      return `${base} border border-neutral-600 bg-neutral-900 text-xl font-medium text-neutral-100 opacity-40`;
+    }
+    return `${base} border border-neutral-600 bg-neutral-900 text-xl font-medium text-neutral-100 hover:bg-neutral-800 active:bg-neutral-700`;
+  }
+  if (selected) {
+    return `${base} bg-sky-200 text-neutral-900`;
+  }
+  if (dimOthers) {
+    return `${base} bg-neutral-100 text-neutral-900 opacity-40`;
+  }
+  return `${base} bg-neutral-100 text-neutral-900 hover:bg-neutral-200 active:bg-neutral-300`;
+}
+
 export default function RemoteClient({ sessionId }: Props) {
   const snap = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
   const session = useSessionStore();
@@ -83,7 +108,7 @@ export default function RemoteClient({ sessionId }: Props) {
           onClick={() => {
             void connect();
           }}
-          className="min-h-14 w-full max-w-sm rounded-lg bg-sky-600 px-6 text-lg font-medium text-white active:bg-sky-500"
+          className="min-h-14 w-full max-w-sm rounded-lg bg-sky-600 px-6 text-lg font-medium text-white hover:bg-sky-500 active:bg-sky-400"
         >
           Connect
         </button>
@@ -100,11 +125,15 @@ export default function RemoteClient({ sessionId }: Props) {
   }
 
   if (snap.phase === "waiting" || snap.phase === "sent") {
+    const waitingLine = snap.everSawTrial
+      ? "Waiting for the next letter…"
+      : "Connected. Waiting for the first letter…";
     return (
-      <main className="flex flex-1 items-center justify-center px-6 text-center">
-        <p className="text-neutral-300">
-          {snap.phase === "sent" ? "Answer sent. Waiting for the next letter…" : "Waiting for the next letter…"}
-        </p>
+      <main className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+        {snap.lastSentLabel !== null && (
+          <p className="text-neutral-200">{`Answer sent: ${snap.lastSentLabel}`}</p>
+        )}
+        <p className="text-neutral-300">{waitingLine}</p>
       </main>
     );
   }
@@ -118,7 +147,7 @@ export default function RemoteClient({ sessionId }: Props) {
           onClick={() => {
             void retryFailed();
           }}
-          className="min-h-14 w-full max-w-sm rounded-lg bg-amber-600 px-6 text-lg font-medium text-white active:bg-amber-500"
+          className="min-h-14 w-full max-w-sm rounded-lg bg-amber-600 px-6 text-lg font-medium text-white hover:bg-amber-500 active:bg-amber-400"
         >
           Tap to retry
         </button>
@@ -133,6 +162,8 @@ export default function RemoteClient({ sessionId }: Props) {
     snap.choiceLocked ||
     entry?.state === "pending" ||
     entry?.state === "sent";
+  const selected = snap.selectedChoice;
+  const dimOthers = selected !== null;
 
   return (
     <main className="flex flex-1 flex-col gap-3 px-4 py-6">
@@ -140,26 +171,36 @@ export default function RemoteClient({ sessionId }: Props) {
         Which letter do you see?
       </p>
       <div className="grid grid-cols-1 gap-3">
-        {snap.choices.map((letter: SloanLetter) => (
-          <button
-            key={letter}
-            type="button"
-            disabled={disabled}
-            onClick={() => {
-              void answer({ kind: "letter", letter });
-            }}
-            className="min-h-16 rounded-lg bg-neutral-100 text-3xl font-semibold text-neutral-900 disabled:opacity-40"
-          >
-            {letter}
-          </button>
-        ))}
+        {snap.choices.map((letter: SloanLetter) => {
+          const isSelected =
+            selected !== null &&
+            selected.kind === "letter" &&
+            selected.letter === letter;
+          return (
+            <button
+              key={letter}
+              type="button"
+              disabled={disabled}
+              onClick={() => {
+                void answer({ kind: "letter", letter });
+              }}
+              className={choiceButtonClass(isSelected, dimOthers && !isSelected, "letter")}
+            >
+              {letter}
+            </button>
+          );
+        })}
         <button
           type="button"
           disabled={disabled}
           onClick={() => {
             void answer({ kind: "not_sure" });
           }}
-          className="min-h-16 rounded-lg border border-neutral-600 bg-neutral-900 text-xl font-medium text-neutral-100 disabled:opacity-40"
+          className={choiceButtonClass(
+            selected !== null && selected.kind === "not_sure",
+            dimOthers && !(selected !== null && selected.kind === "not_sure"),
+            "not_sure",
+          )}
         >
           Not sure
         </button>

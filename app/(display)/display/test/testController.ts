@@ -26,6 +26,7 @@ import * as sessionStore from "@/lib/session/sessionStore";
 export type TestPhase =
   | "idle"
   | "creating"
+  | "resuming"
   | "waiting_for_phone"
   | "ready"
   | "presenting"
@@ -34,6 +35,8 @@ export type TestPhase =
   | "error";
 
 export type SessionFormat = "single" | "flanked-triplet";
+
+export type FormatSource = "chosen" | "state" | "resumed-default";
 
 export type CompletedTrial = {
   trialIndex: number;
@@ -49,6 +52,7 @@ export type CompletedTrial = {
 export type TestSnapshot = {
   phase: TestPhase;
   format: SessionFormat;
+  formatSource: FormatSource;
   distanceMm: number | null;
   sessionId: string | null;
   remoteUrl: string | null;
@@ -81,6 +85,7 @@ const CLIENT_BUILD = "thin-loop-9-10";
 const SERVER_SNAPSHOT: TestSnapshot = {
   phase: "idle",
   format: "flanked-triplet",
+  formatSource: "chosen",
   distanceMm: null,
   sessionId: null,
   remoteUrl: null,
@@ -107,10 +112,85 @@ let channel: SessionChannel | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let pollInFlight = false;
 let startInFlight = false;
+let resumeInFlight = false;
 let beginInFlight = false;
 let measureInFlight = false;
 let advanceInFlight = false;
 let disposed = false;
+let resumeGeneration = 0;
+
+const SESSION_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isSessionUuid(value: string): boolean {
+  return SESSION_UUID_RE.test(value);
+}
+
+function setSessionIdInUrl(sessionId: string): void {
+  const nextUrl = `${window.location.pathname}?session=${sessionId}`;
+  window.history.replaceState(window.history.state, "", nextUrl);
+}
+
+function formatFromCurrentState(currentState: unknown): SessionFormat | null {
+  if (currentState === null || typeof currentState !== "object" || Array.isArray(currentState)) {
+    return null;
+  }
+  if (!("format" in currentState)) {
+    return null;
+  }
+  const format = currentState.format;
+  if (format === "single" || format === "flanked-triplet") {
+    return format;
+  }
+  return null;
+}
+
+/**
+ * Highest trial index known from loop state. Ready / unknown → -1 so the
+ * next trial is 0. Awaiting or responded → that index (already has a row).
+ */
+function highestKnownTrialIndex(state: ReturnType<typeof parseLoopState>): number {
+  if (state === null) {
+    return -1;
+  }
+  if (state.phase === "awaiting_response" || state.phase === "responded") {
+    return state.trialIndex;
+  }
+  return -1;
+}
+
+function rebuildStepIndices(
+  distanceMm: number,
+  nextCalibration: Calibration,
+  format: SessionFormat,
+  viewportWidthCssPx: number,
+  viewportHeightCssPx: number,
+): number[] {
+  const pitchMm = pixelPitchMm(
+    nextCalibration.cssPxPerMm,
+    nextCalibration.devicePixelRatio,
+  );
+  if (format === "flanked-triplet") {
+    return renderableStepIndicesForTriplet(
+      distanceMm,
+      pitchMm,
+      nextCalibration.cssPxPerMm,
+      viewportWidthCssPx,
+      viewportHeightCssPx,
+    );
+  }
+  return renderableStepIndices(distanceMm, pitchMm);
+}
+
+async function buildRemotePairing(sessionId: string): Promise<{
+  remoteUrl: string;
+  qrDataUrl: string;
+}> {
+  const remoteUrl = `${window.location.origin}/remote?session=${sessionId}`;
+  const qrcode = await import("qrcode");
+  const qrDataUrl = await qrcode.toDataURL(remoteUrl, { margin: 1, width: 280 });
+  return { remoteUrl, qrDataUrl };
+}
 
 function emit(next: TestSnapshot): void {
   cachedSnapshot = next;
@@ -498,24 +578,18 @@ export async function start(
   activeTrial = null;
   history = [];
   calibration = nextCalibration;
-  const pitchMm = pixelPitchMm(
-    nextCalibration.cssPxPerMm,
-    nextCalibration.devicePixelRatio,
+  stepIndices = rebuildStepIndices(
+    distanceMm,
+    nextCalibration,
+    format,
+    viewportWidthCssPx,
+    viewportHeightCssPx,
   );
-  stepIndices =
-    format === "flanked-triplet"
-      ? renderableStepIndicesForTriplet(
-          distanceMm,
-          pitchMm,
-          nextCalibration.cssPxPerMm,
-          viewportWidthCssPx,
-          viewportHeightCssPx,
-        )
-      : renderableStepIndices(distanceMm, pitchMm);
 
   patch({
     phase: "creating",
     format,
+    formatSource: "chosen",
     distanceMm,
     sessionId: null,
     remoteUrl: null,
@@ -555,18 +629,202 @@ export async function start(
     }
 
     const sessionId = created.data.id;
-    const remoteUrl = `${window.location.origin}/remote?session=${sessionId}`;
-    const qrcode = await import("qrcode");
-    const qrDataUrl = await qrcode.toDataURL(remoteUrl, { margin: 1, width: 280 });
+    setSessionIdInUrl(sessionId);
+    const pairing = await buildRemotePairing(sessionId);
 
     patch({
       phase: "waiting_for_phone",
       sessionId,
-      remoteUrl,
-      qrDataUrl,
+      remoteUrl: pairing.remoteUrl,
+      qrDataUrl: pairing.qrDataUrl,
     });
   } finally {
     startInFlight = false;
+  }
+}
+
+/**
+ * Adopt an existing session from the address bar after reload.
+ * Never creates, pairs, or attaches calibration.
+ */
+export async function resume(
+  sessionId: string,
+  nextCalibration: Calibration,
+  viewportWidthCssPx: number,
+  viewportHeightCssPx: number,
+): Promise<void> {
+  if (resumeInFlight) {
+    return;
+  }
+  if (cachedSnapshot.sessionId !== null) {
+    return;
+  }
+  if (!isSessionUuid(sessionId)) {
+    return;
+  }
+
+  resumeInFlight = true;
+  disposed = false;
+  const generation = resumeGeneration;
+  leaveChannel();
+  stopPoll();
+  activeTrial = null;
+  history = [];
+  calibration = nextCalibration;
+
+  patch({
+    phase: "resuming",
+    sessionId: null,
+    remoteUrl: null,
+    qrDataUrl: null,
+    currentTrialIndex: null,
+    currentStepIndex: null,
+    currentTarget: null,
+    currentLeftFlanker: null,
+    currentRightFlanker: null,
+    cssPxPerMm: nextCalibration.cssPxPerMm,
+    devicePixelRatio: nextCalibration.devicePixelRatio,
+    history: [],
+    errorMessage: null,
+  });
+
+  try {
+    sessionStore.reset();
+    const loaded = await sessionStore.loadSession(sessionId);
+    if (!loaded.ok) {
+      fail(loaded.error.message);
+      return;
+    }
+    if (disposed || generation !== resumeGeneration) {
+      return;
+    }
+
+    const view = loaded.data;
+    const distanceMm = view.distanceMmRequested;
+    if (distanceMm === null) {
+      fail("This session has no viewing distance stored.");
+      return;
+    }
+
+    const stateFormat = formatFromCurrentState(view.currentState);
+    const format: SessionFormat = stateFormat ?? "flanked-triplet";
+    const formatSource: FormatSource =
+      stateFormat !== null ? "state" : "resumed-default";
+
+    stepIndices = rebuildStepIndices(
+      distanceMm,
+      nextCalibration,
+      format,
+      viewportWidthCssPx,
+      viewportHeightCssPx,
+    );
+
+    setSessionIdInUrl(view.id);
+    const pairing = await buildRemotePairing(view.id);
+    if (disposed || generation !== resumeGeneration) {
+      return;
+    }
+
+    if (view.status === "created") {
+      patch({
+        phase: "waiting_for_phone",
+        format,
+        formatSource,
+        distanceMm,
+        sessionId: view.id,
+        remoteUrl: pairing.remoteUrl,
+        qrDataUrl: pairing.qrDataUrl,
+        errorMessage: null,
+      });
+      return;
+    }
+
+    if (view.status === "paired") {
+      patch({
+        phase: "ready",
+        format,
+        formatSource,
+        distanceMm,
+        sessionId: view.id,
+        remoteUrl: pairing.remoteUrl,
+        qrDataUrl: pairing.qrDataUrl,
+        errorMessage: null,
+      });
+      return;
+    }
+
+    if (view.status === "complete") {
+      patch({
+        phase: "complete",
+        format,
+        formatSource,
+        distanceMm,
+        sessionId: view.id,
+        remoteUrl: pairing.remoteUrl,
+        qrDataUrl: pairing.qrDataUrl,
+        history: [],
+        errorMessage: null,
+      });
+      return;
+    }
+
+    if (view.status === "running") {
+      const loopState = parseLoopState(view.currentState);
+      const nextTrialIndex = highestKnownTrialIndex(loopState) + 1;
+
+      patch({
+        format,
+        formatSource,
+        distanceMm,
+        sessionId: view.id,
+        remoteUrl: pairing.remoteUrl,
+        qrDataUrl: pairing.qrDataUrl,
+        errorMessage: null,
+      });
+
+      const ready = await sessionStore.setState("running", readyState());
+      if (!ready.ok) {
+        fail(ready.error.message);
+        return;
+      }
+      if (disposed || generation !== resumeGeneration) {
+        return;
+      }
+      if (channel !== null) {
+        await channel.sendNudge("running");
+      }
+
+      if (nextTrialIndex >= stepIndices.length) {
+        const done = await sessionStore.setState(
+          "complete",
+          completeState(history.length),
+        );
+        if (!done.ok) {
+          fail(done.error.message);
+          return;
+        }
+        if (channel !== null) {
+          await channel.sendNudge("complete");
+        }
+        patch({
+          phase: "complete",
+          currentTrialIndex: null,
+          currentStepIndex: null,
+          currentTarget: null,
+          currentLeftFlanker: null,
+          currentRightFlanker: null,
+          history,
+        });
+        return;
+      }
+
+      await presentTrialAt(nextTrialIndex);
+      return;
+    }
+
+    fail(`Cannot resume a session in status "${view.status}".`);
+  } finally {
+    resumeInFlight = false;
   }
 }
 
@@ -607,9 +865,11 @@ export async function beginTrials(): Promise<void> {
 
 export function dispose(): void {
   disposed = true;
+  resumeGeneration += 1;
   stopPoll();
   leaveChannel();
   startInFlight = false;
+  resumeInFlight = false;
   beginInFlight = false;
   measureInFlight = false;
   advanceInFlight = false;

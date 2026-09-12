@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { OptotypeCanvas } from "@/app/(display)/display/optotype/OptotypeCanvas";
 import { useCalibration } from "@/app/(display)/display/calibrate/useCalibration";
@@ -12,17 +12,22 @@ import {
   getServerSnapshot,
   getSnapshot,
   handleCanvasMeasured,
+  resume,
   type SessionFormat,
   start,
   subscribe,
   watchSession,
 } from "./testController";
 
+const SESSION_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 export default function TestClient() {
   const { ready, calibration, validity } = useCalibration();
   const snap = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
   const [distanceMm, setDistanceMm] = useState<3000 | 2000>(3000);
   const [format, setFormat] = useState<SessionFormat>("flanked-triplet");
+  const resumeStarted = useRef(false);
 
   useEffect(() => {
     return () => {
@@ -35,6 +40,24 @@ export default function TestClient() {
       watchSession(snap.sessionId);
     }
   }, [snap.sessionId]);
+
+  useEffect(() => {
+    if (resumeStarted.current) {
+      return;
+    }
+    if (!ready || calibration === null || validity === null || !validity.ok) {
+      return;
+    }
+    if (getSnapshot().sessionId !== null) {
+      return;
+    }
+    const raw = new URLSearchParams(window.location.search).get("session");
+    if (raw === null || !SESSION_UUID_RE.test(raw)) {
+      return;
+    }
+    resumeStarted.current = true;
+    void resume(raw, calibration, window.innerWidth, window.innerHeight);
+  }, [ready, calibration, validity]);
 
   if (!ready) {
     return (
@@ -113,6 +136,10 @@ export default function TestClient() {
       <p className="text-sm text-neutral-400">
         Thin loop only: QR pair, one letter at a time, five choices on the phone.
       </p>
+
+      {snap.phase === "resuming" && (
+        <p className="text-neutral-400">Resuming session…</p>
+      )}
 
       {(snap.phase === "idle" || snap.phase === "error") && (
         <section className="flex flex-col gap-4">

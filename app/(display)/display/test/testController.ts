@@ -6,8 +6,10 @@ import {
 } from "@/lib/acuity/logmar";
 import {
   buildTrialChoices,
+  pickFlankers,
   pickTarget,
   renderableStepIndices,
+  renderableStepIndicesForTriplet,
 } from "@/lib/acuity/thinLoop";
 import type { SloanLetter } from "@/lib/acuity/sloan";
 import type { PresentationPayload } from "@/lib/db/payloads";
@@ -31,10 +33,14 @@ export type TestPhase =
   | "complete"
   | "error";
 
+export type SessionFormat = "single" | "flanked-triplet";
+
 export type CompletedTrial = {
   trialIndex: number;
   stepIndex: number;
   target: SloanLetter;
+  leftFlanker: SloanLetter | null;
+  rightFlanker: SloanLetter | null;
   responseKind: "letter" | "not_sure";
   responseLetter: SloanLetter | null;
   correct: boolean;
@@ -42,6 +48,7 @@ export type CompletedTrial = {
 
 export type TestSnapshot = {
   phase: TestPhase;
+  format: SessionFormat;
   distanceMm: number | null;
   sessionId: string | null;
   remoteUrl: string | null;
@@ -49,6 +56,8 @@ export type TestSnapshot = {
   currentTrialIndex: number | null;
   currentStepIndex: number | null;
   currentTarget: SloanLetter | null;
+  currentLeftFlanker: SloanLetter | null;
+  currentRightFlanker: SloanLetter | null;
   cssPxPerMm: number | null;
   devicePixelRatio: number | null;
   history: readonly CompletedTrial[];
@@ -59,6 +68,8 @@ type ActiveTrial = {
   trialIndex: number;
   stepIndex: number;
   target: SloanLetter;
+  leftFlanker: SloanLetter | null;
+  rightFlanker: SloanLetter | null;
   choices: SloanLetter[];
   presentationId: string | null;
   recorded: boolean;
@@ -69,6 +80,7 @@ const CLIENT_BUILD = "thin-loop-9-10";
 
 const SERVER_SNAPSHOT: TestSnapshot = {
   phase: "idle",
+  format: "flanked-triplet",
   distanceMm: null,
   sessionId: null,
   remoteUrl: null,
@@ -76,6 +88,8 @@ const SERVER_SNAPSHOT: TestSnapshot = {
   currentTrialIndex: null,
   currentStepIndex: null,
   currentTarget: null,
+  currentLeftFlanker: null,
+  currentRightFlanker: null,
   cssPxPerMm: null,
   devicePixelRatio: null,
   history: [],
@@ -196,6 +210,8 @@ async function tryAdvanceFromResponded(): Promise<void> {
         trialIndex: trial.trialIndex,
         stepIndex: trial.stepIndex,
         target: trial.target,
+        leftFlanker: trial.leftFlanker,
+        rightFlanker: trial.rightFlanker,
         responseKind: state.responseKind,
         responseLetter: state.responseLetter,
         correct,
@@ -220,6 +236,8 @@ async function tryAdvanceFromResponded(): Promise<void> {
         currentTrialIndex: null,
         currentStepIndex: null,
         currentTarget: null,
+        currentLeftFlanker: null,
+        currentRightFlanker: null,
         history,
       });
       return;
@@ -291,10 +309,19 @@ async function presentTrialAt(trialIndex: number): Promise<void> {
 
   const target = pickTarget(Math.random);
   const choices = buildTrialChoices(target, Math.random);
+  let leftFlanker: SloanLetter | null = null;
+  let rightFlanker: SloanLetter | null = null;
+  if (cachedSnapshot.format === "flanked-triplet") {
+    const flankers = pickFlankers(target, Math.random);
+    leftFlanker = flankers[0];
+    rightFlanker = flankers[1];
+  }
   activeTrial = {
     trialIndex,
     stepIndex,
     target,
+    leftFlanker,
+    rightFlanker,
     choices,
     presentationId: null,
     recorded: false,
@@ -305,6 +332,8 @@ async function presentTrialAt(trialIndex: number): Promise<void> {
     currentTrialIndex: trialIndex,
     currentStepIndex: stepIndex,
     currentTarget: target,
+    currentLeftFlanker: leftFlanker,
+    currentRightFlanker: rightFlanker,
     errorMessage: null,
   });
 }
@@ -362,14 +391,34 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
       requested_stroke_width_mm: strokeWidthMm,
       requested_letter_height_css_px: letterHeightCssPx,
       requested_letter_height_device_px: letterHeightDevicePx,
-      optotypes: [trial.target],
-      target_index: 0,
-      format: "single",
+      optotypes:
+        trial.leftFlanker !== null && trial.rightFlanker !== null
+          ? [trial.leftFlanker, trial.target, trial.rightFlanker]
+          : [trial.target],
+      target_index:
+        trial.leftFlanker !== null && trial.rightFlanker !== null ? 1 : 0,
+      format:
+        trial.leftFlanker !== null && trial.rightFlanker !== null
+          ? "flanked-triplet"
+          : "single",
       distance_mm_requested: distanceMm,
       actual_letter_height_device_px: measurement.inkBounds.heightPx,
       rendered_at: new Date().toISOString(),
       visibility_confirmed: document.visibilityState === "visible",
     };
+
+    if (trial.leftFlanker !== null && trial.rightFlanker !== null) {
+      const arrowHeightCssPx = Math.min(40, Math.max(12, letterHeightCssPx));
+      const arrowGapCssPx = Math.min(40, Math.max(12, letterHeightCssPx));
+      payload.crowding_spec = {
+        spacing_letter_widths: 1,
+        spacing_basis: "edge-to-edge",
+        arrow: "above-target",
+        flanker_rule: "random-distinct",
+        arrow_height_css_px: arrowHeightCssPx,
+        arrow_gap_css_px: arrowGapCssPx,
+      };
+    }
 
     if (trial.target === "H" && measurement.strokeWidthDevicePx !== null) {
       payload.actual_stroke_width_device_px = measurement.strokeWidthDevicePx;
@@ -431,6 +480,9 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
 export async function start(
   distanceMm: number,
   nextCalibration: Calibration,
+  format: SessionFormat,
+  viewportWidthCssPx: number,
+  viewportHeightCssPx: number,
 ): Promise<void> {
   if (startInFlight) {
     return;
@@ -446,13 +498,24 @@ export async function start(
   activeTrial = null;
   history = [];
   calibration = nextCalibration;
-  stepIndices = renderableStepIndices(
-    distanceMm,
-    pixelPitchMm(nextCalibration.cssPxPerMm, nextCalibration.devicePixelRatio),
+  const pitchMm = pixelPitchMm(
+    nextCalibration.cssPxPerMm,
+    nextCalibration.devicePixelRatio,
   );
+  stepIndices =
+    format === "flanked-triplet"
+      ? renderableStepIndicesForTriplet(
+          distanceMm,
+          pitchMm,
+          nextCalibration.cssPxPerMm,
+          viewportWidthCssPx,
+          viewportHeightCssPx,
+        )
+      : renderableStepIndices(distanceMm, pitchMm);
 
   patch({
     phase: "creating",
+    format,
     distanceMm,
     sessionId: null,
     remoteUrl: null,
@@ -460,6 +523,8 @@ export async function start(
     currentTrialIndex: null,
     currentStepIndex: null,
     currentTarget: null,
+    currentLeftFlanker: null,
+    currentRightFlanker: null,
     cssPxPerMm: nextCalibration.cssPxPerMm,
     devicePixelRatio: nextCalibration.devicePixelRatio,
     history: [],

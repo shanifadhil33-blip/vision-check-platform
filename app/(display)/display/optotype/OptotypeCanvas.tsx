@@ -4,16 +4,19 @@ import { useEffect, useRef } from "react";
 import { mmToCssPx } from "@/lib/calibration";
 import { letterHeightMmForLogMar } from "@/lib/acuity/logmar";
 import {
-  measureAllRuns,
   measureInkBounds,
   type InkBounds,
   type InkRun,
 } from "@/lib/acuity/measure";
-import { SLOAN_GRID_UNITS, sloanPath, type SloanLetter } from "@/lib/acuity/sloan";
+import { SLOAN_GRID_UNITS, type SloanLetter } from "@/lib/acuity/sloan";
+import {
+  H_STROKE_SCAN_EXPECTED_RUNS,
+  H_STROKE_SCAN_FRACTION,
+  measureHStrokeScan,
+  strokeLetter,
+} from "@/app/(display)/display/_render/sloanStroke";
 
-/** H at quarter-height has two stems and no crossbar. */
-export const H_STROKE_SCAN_EXPECTED_RUNS = 2;
-export const H_STROKE_SCAN_FRACTION = 0.25;
+export { H_STROKE_SCAN_EXPECTED_RUNS, H_STROKE_SCAN_FRACTION };
 
 export type OptotypeMeasurement = {
   inkBounds: InkBounds | null;
@@ -37,30 +40,6 @@ type OptotypeCanvasProps = {
   onMeasured?: ((measurement: OptotypeMeasurement) => void) | undefined;
 };
 
-function strokeLetter(
-  ctx: CanvasRenderingContext2D,
-  letter: SloanLetter,
-  dpr: number,
-  sizeCssPx: number,
-): void {
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const unitScale = sizeCssPx / SLOAN_GRID_UNITS;
-  ctx.scale(unitScale, unitScale);
-  ctx.save();
-  // Clip to the letter box so diagonal strokes and miters cannot paint outside 0..5.
-  ctx.beginPath();
-  ctx.rect(0, 0, SLOAN_GRID_UNITS, SLOAN_GRID_UNITS);
-  ctx.clip();
-  const path = new Path2D(sloanPath(letter));
-  ctx.strokeStyle = "#000000";
-  ctx.lineWidth = 1;
-  ctx.lineCap = "butt";
-  ctx.lineJoin = "miter";
-  ctx.miterLimit = 10;
-  ctx.stroke(path);
-  ctx.restore();
-}
-
 function drawGrid(ctx: CanvasRenderingContext2D, dpr: number, sizeCssPx: number): void {
   // Same setTransform + unitScale as strokeLetter: grid lines at 0..5 in letter space.
   // Drawn without the letter clip so the full grid remains the visual reference.
@@ -81,60 +60,6 @@ function drawGrid(ctx: CanvasRenderingContext2D, dpr: number, sizeCssPx: number)
     ctx.lineTo(SLOAN_GRID_UNITS, i);
     ctx.stroke();
   }
-}
-
-function measureHStrokeScan(
-  widthDevicePx: number,
-  heightDevicePx: number,
-  dpr: number,
-  sizeCssPx: number,
-): {
-  strokeScanRowDevicePx: number | null;
-  strokeScanPercentOfInkHeight: number | null;
-  strokeRuns: InkRun[];
-  strokeWidthDevicePx: number | null;
-} {
-  const canvas = document.createElement("canvas");
-  canvas.width = widthDevicePx;
-  canvas.height = heightDevicePx;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  if (ctx === null) {
-    return {
-      strokeScanRowDevicePx: null,
-      strokeScanPercentOfInkHeight: null,
-      strokeRuns: [],
-      strokeWidthDevicePx: null,
-    };
-  }
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.clearRect(0, 0, widthDevicePx, heightDevicePx);
-  strokeLetter(ctx, "H", dpr, sizeCssPx);
-  const image = ctx.getImageData(0, 0, widthDevicePx, heightDevicePx);
-  const hBounds = measureInkBounds(image.data, widthDevicePx, heightDevicePx);
-  if (hBounds === null) {
-    return {
-      strokeScanRowDevicePx: null,
-      strokeScanPercentOfInkHeight: null,
-      strokeRuns: [],
-      strokeWidthDevicePx: null,
-    };
-  }
-
-  const scanRowY = hBounds.top + Math.floor(hBounds.heightPx * H_STROKE_SCAN_FRACTION);
-  const strokeRuns = measureAllRuns(image.data, widthDevicePx, heightDevicePx, scanRowY);
-  const strokeScanPercentOfInkHeight =
-    hBounds.heightPx === 0 ? null : ((scanRowY - hBounds.top) / hBounds.heightPx) * 100;
-  const strokeWidthDevicePx =
-    strokeRuns.length === H_STROKE_SCAN_EXPECTED_RUNS
-      ? strokeRuns.reduce((sum, run) => sum + run.widthPx, 0) / strokeRuns.length
-      : null;
-
-  return {
-    strokeScanRowDevicePx: scanRowY,
-    strokeScanPercentOfInkHeight,
-    strokeRuns,
-    strokeWidthDevicePx,
-  };
 }
 
 export function OptotypeCanvas({

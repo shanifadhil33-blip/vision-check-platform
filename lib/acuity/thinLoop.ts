@@ -3,6 +3,7 @@
  * Pure numbers / letters in — no browser APIs (AGENTS.md rule 1).
  */
 
+import { letterHeightMmForLogMar } from "./logmar";
 import { canRenderLogMar } from "./renderableRange";
 import { SLOAN_LETTERS, type SloanLetter } from "./sloan";
 
@@ -22,6 +23,33 @@ export function renderableStepIndices(
   );
 }
 
+/**
+ * Triplet steps must also fit canvas 5L wide and L+48 tall inside the viewport
+ * margins (viewport sizes are plain numbers measured once at Start).
+ */
+export function renderableStepIndicesForTriplet(
+  distanceMm: number,
+  pixelPitchMmValue: number,
+  cssPxPerMm: number,
+  viewportWidthCssPx: number,
+  viewportHeightCssPx: number,
+): number[] {
+  return THIN_LOOP_STEP_INDICES.filter((stepIndex) => {
+    if (!canRenderLogMar(stepIndex / 10, distanceMm, pixelPitchMmValue)) {
+      return false;
+    }
+    const letterHeightCssPx =
+      letterHeightMmForLogMar(stepIndex / 10, distanceMm) * cssPxPerMm;
+    if (5 * letterHeightCssPx > viewportWidthCssPx - 64) {
+      return false;
+    }
+    if (letterHeightCssPx + 48 > viewportHeightCssPx - 64) {
+      return false;
+    }
+    return true;
+  });
+}
+
 export function pickTarget(random: () => number): SloanLetter {
   const index = Math.floor(random() * SLOAN_LETTERS.length);
   const letter = SLOAN_LETTERS[index];
@@ -29,6 +57,30 @@ export function pickTarget(random: () => number): SloanLetter {
     return SLOAN_LETTERS[0];
   }
   return letter;
+}
+
+/**
+ * Two flankers, each different from the target and from each other.
+ */
+export function pickFlankers(
+  target: SloanLetter,
+  random: () => number,
+): [SloanLetter, SloanLetter] {
+  const pool: SloanLetter[] = [];
+  for (const letter of SLOAN_LETTERS) {
+    if (letter !== target) {
+      pool.push(letter);
+    }
+  }
+
+  const firstIndex = Math.floor(random() * pool.length);
+  const [first] = pool.splice(firstIndex, 1);
+  const secondIndex = Math.floor(random() * pool.length);
+  const [second] = pool.splice(secondIndex, 1);
+  if (first === undefined || second === undefined) {
+    return [SLOAN_LETTERS[0], SLOAN_LETTERS[1]];
+  }
+  return [first, second];
 }
 
 /**

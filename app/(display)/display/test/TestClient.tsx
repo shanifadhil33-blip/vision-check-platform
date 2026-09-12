@@ -5,12 +5,14 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { OptotypeCanvas } from "@/app/(display)/display/optotype/OptotypeCanvas";
 import { useCalibration } from "@/app/(display)/display/calibrate/useCalibration";
+import { TripletCanvas } from "./TripletCanvas";
 import {
   beginTrials,
   dispose,
   getServerSnapshot,
   getSnapshot,
   handleCanvasMeasured,
+  type SessionFormat,
   start,
   subscribe,
   watchSession,
@@ -20,6 +22,7 @@ export default function TestClient() {
   const { ready, calibration, validity } = useCalibration();
   const snap = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
   const [distanceMm, setDistanceMm] = useState<3000 | 2000>(3000);
+  const [format, setFormat] = useState<SessionFormat>("flanked-triplet");
 
   useEffect(() => {
     return () => {
@@ -61,20 +64,48 @@ export default function TestClient() {
   ) {
     const logMar =
       snap.currentStepIndex === null ? 0 : snap.currentStepIndex / 10;
+    const distance = snap.distanceMm ?? distanceMm;
+    const cssPxPerMm = snap.cssPxPerMm ?? calibration.cssPxPerMm;
+    const devicePixelRatio = snap.devicePixelRatio ?? calibration.devicePixelRatio;
+
+    if (
+      snap.format === "flanked-triplet" &&
+      snap.currentLeftFlanker !== null &&
+      snap.currentRightFlanker !== null
+    ) {
+      return (
+        <main className="flex min-h-full flex-1 items-center justify-center bg-white">
+          <TripletCanvas
+            key={snap.currentTrialIndex ?? 0}
+            left={snap.currentLeftFlanker}
+            target={snap.currentTarget}
+            right={snap.currentRightFlanker}
+            logMar={logMar}
+            distanceMm={distance}
+            cssPxPerMm={cssPxPerMm}
+            devicePixelRatio={devicePixelRatio}
+            onMeasured={handleCanvasMeasured}
+          />
+        </main>
+      );
+    }
+
     return (
       <main className="flex min-h-full flex-1 items-center justify-center bg-white">
         <OptotypeCanvas
           key={snap.currentTrialIndex ?? 0}
           letter={snap.currentTarget}
           logMar={logMar}
-          distanceMm={snap.distanceMm ?? distanceMm}
-          cssPxPerMm={snap.cssPxPerMm ?? calibration.cssPxPerMm}
-          devicePixelRatio={snap.devicePixelRatio ?? calibration.devicePixelRatio}
+          distanceMm={distance}
+          cssPxPerMm={cssPxPerMm}
+          devicePixelRatio={devicePixelRatio}
           onMeasured={handleCanvasMeasured}
         />
       </main>
     );
   }
+
+  const showFlankersColumn = snap.format === "flanked-triplet";
 
   return (
     <main className="mx-auto flex w-full max-w-xl flex-1 flex-col gap-6 px-6 py-10">
@@ -85,6 +116,24 @@ export default function TestClient() {
 
       {(snap.phase === "idle" || snap.phase === "error") && (
         <section className="flex flex-col gap-4">
+          <label className="flex flex-col gap-1 text-sm text-neutral-300">
+            Format
+            <select
+              value={format}
+              onChange={(event) => {
+                const value = event.target.value;
+                if (value === "single") {
+                  setFormat("single");
+                  return;
+                }
+                setFormat("flanked-triplet");
+              }}
+              className="rounded border border-neutral-600 bg-neutral-950 px-3 py-2"
+            >
+              <option value="flanked-triplet">Flanked triplet</option>
+              <option value="single">Single letter</option>
+            </select>
+          </label>
           <label className="flex flex-col gap-1 text-sm text-neutral-300">
             Viewing distance
             <select
@@ -106,7 +155,13 @@ export default function TestClient() {
           <button
             type="button"
             onClick={() => {
-              void start(distanceMm, calibration);
+              void start(
+                distanceMm,
+                calibration,
+                format,
+                window.innerWidth,
+                window.innerHeight,
+              );
             }}
             className="rounded bg-sky-600 px-4 py-3 text-base font-medium text-white hover:bg-sky-500"
           >
@@ -168,6 +223,7 @@ export default function TestClient() {
                 <th className="py-2 pr-2">#</th>
                 <th className="py-2 pr-2">logMAR</th>
                 <th className="py-2 pr-2">Target</th>
+                {showFlankersColumn && <th className="py-2 pr-2">Flankers</th>}
                 <th className="py-2 pr-2">Response</th>
                 <th className="py-2">OK</th>
               </tr>
@@ -178,6 +234,13 @@ export default function TestClient() {
                   <td className="py-2 pr-2">{row.trialIndex}</td>
                   <td className="py-2 pr-2">{(row.stepIndex / 10).toFixed(1)}</td>
                   <td className="py-2 pr-2">{row.target}</td>
+                  {showFlankersColumn && (
+                    <td className="py-2 pr-2">
+                      {row.leftFlanker !== null && row.rightFlanker !== null
+                        ? `${row.leftFlanker} · ${row.rightFlanker}`
+                        : "—"}
+                    </td>
+                  )}
                   <td className="py-2 pr-2">
                     {row.responseKind === "not_sure" ? "not sure" : row.responseLetter}
                   </td>

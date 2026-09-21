@@ -14,11 +14,14 @@ export const CALIBRATION_STORAGE_KEY = "vcp.calibration.v1";
 type CalibrationSnapshot = {
   calibration: Calibration | null;
   deviceContext: DeviceContext | null;
+  /** Live browser chrome width; never stored on Calibration. */
+  outerWidthCssPx: number | null;
 };
 
 const SERVER_SNAPSHOT: CalibrationSnapshot = {
   calibration: null,
   deviceContext: null,
+  outerWidthCssPx: null,
 };
 
 const listeners = new Set<() => void>();
@@ -34,6 +37,21 @@ function readDeviceContext(): DeviceContext {
     screenHeightCssPx: window.screen.height,
     userAgent: navigator.userAgent,
   };
+}
+
+function readOuterWidthCssPx(): number {
+  return window.outerWidth;
+}
+
+function deviceContextsEqual(a: DeviceContext, b: DeviceContext): boolean {
+  return (
+    a.devicePixelRatio === b.devicePixelRatio &&
+    a.viewportWidthCssPx === b.viewportWidthCssPx &&
+    a.viewportHeightCssPx === b.viewportHeightCssPx &&
+    a.screenWidthCssPx === b.screenWidthCssPx &&
+    a.screenHeightCssPx === b.screenHeightCssPx &&
+    a.userAgent === b.userAgent
+  );
 }
 
 function isCalibrationRecord(value: unknown): value is Calibration {
@@ -72,18 +90,43 @@ function readStoredCalibration(): Calibration | null {
   }
 }
 
-function buildSnapshot(): CalibrationSnapshot {
-  return {
-    calibration: readStoredCalibration(),
-    deviceContext: readDeviceContext(),
-  };
-}
-
-function emit(): void {
-  cachedSnapshot = buildSnapshot();
+function notify(): void {
   for (const listener of listeners) {
     listener();
   }
+}
+
+/**
+ * Rebuild browser metrics only when a live value actually changed so
+ * getSnapshot keeps returning the same object reference otherwise.
+ */
+function emitBrowserMetrics(): void {
+  const deviceContext = readDeviceContext();
+  const outerWidthCssPx = readOuterWidthCssPx();
+  const previous = cachedSnapshot;
+  if (
+    previous.deviceContext !== null &&
+    previous.outerWidthCssPx !== null &&
+    deviceContextsEqual(previous.deviceContext, deviceContext) &&
+    previous.outerWidthCssPx === outerWidthCssPx
+  ) {
+    return;
+  }
+  cachedSnapshot = {
+    ...previous,
+    deviceContext,
+    outerWidthCssPx,
+  };
+  notify();
+}
+
+function emitFromStorage(): void {
+  const calibration = readStoredCalibration();
+  cachedSnapshot = {
+    ...cachedSnapshot,
+    calibration,
+  };
+  notify();
 }
 
 function subscribe(listener: () => void): () => void {
@@ -93,7 +136,11 @@ function subscribe(listener: () => void): () => void {
     if (event.key !== null && event.key !== CALIBRATION_STORAGE_KEY) {
       return;
     }
-    emit();
+    emitFromStorage();
+  }
+
+  function onResize(): void {
+    emitBrowserMetrics();
   }
 
   let mediaQueryList: MediaQueryList | null = null;
@@ -102,7 +149,7 @@ function subscribe(listener: () => void): () => void {
     if (mediaQueryList !== null) {
       mediaQueryList.removeEventListener("change", onResolutionChange);
     }
-    emit();
+    emitBrowserMetrics();
     subscribeResolution();
   }
 
@@ -112,11 +159,13 @@ function subscribe(listener: () => void): () => void {
   }
 
   window.addEventListener("storage", onStorage);
+  window.addEventListener("resize", onResize);
   subscribeResolution();
 
   return () => {
     listeners.delete(listener);
     window.removeEventListener("storage", onStorage);
+    window.removeEventListener("resize", onResize);
     if (mediaQueryList !== null) {
       mediaQueryList.removeEventListener("change", onResolutionChange);
     }
@@ -125,7 +174,11 @@ function subscribe(listener: () => void): () => void {
 
 function getSnapshot(): CalibrationSnapshot {
   if (!clientInitialized) {
-    cachedSnapshot = buildSnapshot();
+    cachedSnapshot = {
+      calibration: readStoredCalibration(),
+      deviceContext: readDeviceContext(),
+      outerWidthCssPx: readOuterWidthCssPx(),
+    };
     clientInitialized = true;
   }
   return cachedSnapshot;
@@ -137,7 +190,7 @@ function getServerSnapshot(): CalibrationSnapshot {
 
 function save(next: Calibration): void {
   localStorage.setItem(CALIBRATION_STORAGE_KEY, JSON.stringify(next));
-  emit();
+  emitFromStorage();
 }
 
 function addVerification(verification: CalibrationVerification): void {
@@ -150,7 +203,7 @@ function addVerification(verification: CalibrationVerification): void {
     verifications: [...current.verifications, verification],
   };
   localStorage.setItem(CALIBRATION_STORAGE_KEY, JSON.stringify(next));
-  emit();
+  emitFromStorage();
 }
 
 function removeVerification(createdAtIso: string): void {
@@ -163,18 +216,19 @@ function removeVerification(createdAtIso: string): void {
     verifications: current.verifications.filter((entry) => entry.createdAtIso !== createdAtIso),
   };
   localStorage.setItem(CALIBRATION_STORAGE_KEY, JSON.stringify(next));
-  emit();
+  emitFromStorage();
 }
 
 function clear(): void {
   localStorage.removeItem(CALIBRATION_STORAGE_KEY);
-  emit();
+  emitFromStorage();
 }
 
 export type UseCalibrationResult = {
   ready: boolean;
   calibration: Calibration | null;
   deviceContext: DeviceContext | null;
+  outerWidthCssPx: number | null;
   validity: ValidityResult | null;
   save: (next: Calibration) => void;
   addVerification: (verification: CalibrationVerification) => void;
@@ -194,6 +248,7 @@ export function useCalibration(): UseCalibrationResult {
     ready: snapshot.deviceContext !== null,
     calibration: snapshot.calibration,
     deviceContext: snapshot.deviceContext,
+    outerWidthCssPx: snapshot.outerWidthCssPx,
     validity,
     save,
     addVerification,

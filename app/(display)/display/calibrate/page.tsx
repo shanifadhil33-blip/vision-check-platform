@@ -1,6 +1,14 @@
 import { CalibrateFlow } from "./CalibrateFlow";
 
-export default function CalibratePage() {
+export default async function CalibratePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ diag?: string | string[] }>;
+}) {
+  const params = await searchParams;
+  const raw = params.diag;
+  const showDiagnostics = raw === "1";
+
   return (
     <main className="mx-auto flex w-full max-w-4xl flex-1 flex-col items-center gap-8 px-6 py-12">
       <header className="w-full max-w-3xl text-left">
@@ -14,7 +22,7 @@ export default function CalibratePage() {
           to reset zoom before calibrating.
         </p>
       </header>
-      <CalibrateFlow />
+      <CalibrateFlow showDiagnostics={showDiagnostics} />
     </main>
   );
 }

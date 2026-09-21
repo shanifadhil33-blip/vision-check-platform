@@ -12,11 +12,17 @@ const CLAIMED_BAR_MM = 100;
 
 type VerifyStepProps = {
   calibration: Calibration;
+  showDiagnostics: boolean;
   onVerified: (verification: CalibrationVerification) => void;
   onRecalibrate: () => void;
 };
 
-export function VerifyStep({ calibration, onVerified, onRecalibrate }: VerifyStepProps) {
+export function VerifyStep({
+  calibration,
+  showDiagnostics,
+  onVerified,
+  onRecalibrate,
+}: VerifyStepProps) {
   const { removeVerification } = useCalibration();
   const [measuredText, setMeasuredText] = useState("");
   const [lastResult, setLastResult] = useState<CalibrationVerification | null>(null);
@@ -165,7 +171,8 @@ export function VerifyStep({ calibration, onVerified, onRecalibrate }: VerifySte
         </p>
         <p className="text-sm text-neutral-500">
           Measure from the outside of the left mark to the outside of the right mark. Claimed
-          width: {CLAIMED_BAR_MM.toFixed(1)} mm ({barWidthCssPx.toFixed(1)} CSS px)
+          width: {CLAIMED_BAR_MM.toFixed(1)} mm
+          {showDiagnostics ? ` (${barWidthCssPx.toFixed(1)} CSS px)` : null}
         </p>
       </div>
 
@@ -266,7 +273,8 @@ export function VerifyStep({ calibration, onVerified, onRecalibrate }: VerifySte
                     {entry.measuredMm.toFixed(1)} mm measured vs {entry.claimedMm.toFixed(1)} mm
                     claimed · {differenceMm >= 0 ? "+" : ""}
                     {differenceMm.toFixed(1)} mm ({differencePercent >= 0 ? "+" : ""}
-                    {differencePercent.toFixed(1)}%) · {entry.createdAtIso}
+                    {differencePercent.toFixed(1)}%)
+                    {showDiagnostics ? ` · ${entry.createdAtIso}` : null}
                   </span>
                   <button
                     type="button"

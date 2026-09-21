@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { pixelPitchMm, screenPhysicalSizeMm } from "@/lib/calibration";
+import { pixelPitchMm, screenPhysicalSizeMm, zoomSignal } from "@/lib/calibration";
 import { CardMatcher } from "./CardMatcher";
 import { useCalibration } from "./useCalibration";
 import { VerifyStep } from "./VerifyStep";
@@ -14,35 +14,49 @@ function diagnosticsLine(input: {
   screenHeightCssPx: number;
   viewportWidthCssPx: number;
   viewportHeightCssPx: number;
+  includeScreenSize: boolean;
 }): string {
   const pitchMm = pixelPitchMm(input.cssPxPerMm, input.devicePixelRatio);
-  const screenSize = screenPhysicalSizeMm(
-    input.screenWidthCssPx,
-    input.screenHeightCssPx,
-    input.cssPxPerMm,
-  );
-  return [
-    `DPR ${input.devicePixelRatio}`,
+  const parts = [
+    `DPR ${input.devicePixelRatio.toFixed(3)}`,
     `${input.cssPxPerMm.toFixed(4)} CSS px/mm`,
     `pitch ${pitchMm.toFixed(4)} mm`,
     `card ${input.cardWidthCssPx.toFixed(1)} CSS px`,
-    `screen ${screenSize.widthMm.toFixed(0)}×${screenSize.heightMm.toFixed(0)} mm (${screenSize.diagonalInches.toFixed(1)} in)`,
-    `viewport ${input.viewportWidthCssPx}×${input.viewportHeightCssPx} CSS px`,
-  ].join(" · ");
+  ];
+  if (input.includeScreenSize) {
+    const screenSize = screenPhysicalSizeMm(
+      input.screenWidthCssPx,
+      input.screenHeightCssPx,
+      input.cssPxPerMm,
+    );
+    parts.push(
+      `screen ${screenSize.widthMm.toFixed(0)}×${screenSize.heightMm.toFixed(0)} mm (${screenSize.diagonalInches.toFixed(1)} in)`,
+    );
+  } else {
+    parts.push("screen size withheld");
+  }
+  parts.push(`viewport ${input.viewportWidthCssPx}×${input.viewportHeightCssPx} CSS px`);
+  return parts.join(" · ");
 }
 
-export function CalibrateFlow() {
-  const { ready, calibration, deviceContext, validity, save, addVerification } =
+type CalibrateFlowProps = {
+  showDiagnostics: boolean;
+};
+
+export function CalibrateFlow({ showDiagnostics }: CalibrateFlowProps) {
+  const { ready, calibration, deviceContext, outerWidthCssPx, validity, save, addVerification } =
     useCalibration();
   const [isRecalibrating, setIsRecalibrating] = useState(false);
 
-  if (!ready || deviceContext === null) {
+  if (!ready || deviceContext === null || outerWidthCssPx === null) {
     return <p className="text-neutral-400">Reading this display…</p>;
   }
 
   const isValid = calibration !== null && validity?.ok === true;
   const isInvalid = calibration !== null && validity !== null && !validity.ok;
   const showMatcher = !isValid || isRecalibrating;
+  const zoom = zoomSignal(outerWidthCssPx, deviceContext.viewportWidthCssPx);
+  const includeScreenSize = zoom.state === "default" || zoom.state === "unknown";
 
   if (showMatcher) {
     return (
@@ -63,6 +77,8 @@ export function CalibrateFlow() {
         ) : null}
         <CardMatcher
           deviceContext={deviceContext}
+          outerWidthCssPx={outerWidthCssPx}
+          showDiagnostics={showDiagnostics}
           onConfirm={(next) => {
             save(next);
             setIsRecalibrating(false);
@@ -86,13 +102,19 @@ export function CalibrateFlow() {
   return (
     <div className="flex w-full flex-col gap-8">
       <div className="rounded border border-neutral-800 bg-neutral-900/50 px-4 py-3 text-left text-sm text-neutral-300">
-        <p>
-          Valid calibration · {calibration.cssPxPerMm.toFixed(2)} CSS px per mm · saved{" "}
-          {calibration.createdAtIso}
-        </p>
-        <p className="mt-1 font-mono text-xs text-neutral-500">
-          {diagnosticsLine(calibration)}
-        </p>
+        {showDiagnostics ? (
+          <p>
+            Valid calibration · {calibration.cssPxPerMm.toFixed(2)} CSS px per mm · saved{" "}
+            {calibration.createdAtIso}
+          </p>
+        ) : (
+          <p>This screen is calibrated.</p>
+        )}
+        {showDiagnostics ? (
+          <p className="mt-1 font-mono text-xs text-neutral-500">
+            {diagnosticsLine({ ...calibration, includeScreenSize })}
+          </p>
+        ) : null}
         <button
           type="button"
           onClick={() => setIsRecalibrating(true)}
@@ -107,6 +129,7 @@ export function CalibrateFlow() {
       </div>
       <VerifyStep
         calibration={calibration}
+        showDiagnostics={showDiagnostics}
         onVerified={addVerification}
         onRecalibrate={() => setIsRecalibrating(true)}
       />

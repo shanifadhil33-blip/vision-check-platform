@@ -22,3 +22,9 @@ export type {
   ValidityResult,
 } from "./types";
 export { isCalibrationStillValid } from "./validity";
+export {
+  ZOOM_SIGNAL_DEFAULT_TOLERANCE,
+  zoomSignal,
+  type ZoomSignal,
+  type ZoomSignalState,
+} from "./zoomSignal";

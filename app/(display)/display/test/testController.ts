@@ -22,6 +22,11 @@ import {
   readyState,
 } from "@/lib/session/loopState";
 import * as sessionStore from "@/lib/session/sessionStore";
+import {
+  setVisibilityPresentationId,
+  startVisibilityTracking,
+  stopVisibilityTracking,
+} from "./visibilityTracker";
 
 export type TestPhase =
   | "idle"
@@ -301,6 +306,7 @@ async function tryAdvanceFromResponded(): Promise<void> {
 
     const nextIndex = trial.trialIndex + 1;
     activeTrial = null;
+    stopVisibilityTracking();
 
     if (nextIndex >= stepIndices.length) {
       const done = await sessionStore.setState("complete", completeState(history.length));
@@ -406,6 +412,8 @@ async function presentTrialAt(trialIndex: number): Promise<void> {
     presentationId: null,
     recorded: false,
   };
+
+  startVisibilityTracking(trialIndex);
 
   patch({
     phase: "presenting",
@@ -521,6 +529,7 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
     }
 
     trial.presentationId = recorded.data;
+    setVisibilityPresentationId(recorded.data);
 
     const eventResult = await sessionStore.appendEvent({
       type: "choices_offered",
@@ -575,6 +584,7 @@ export async function start(
   disposed = false;
   leaveChannel();
   stopPoll();
+  stopVisibilityTracking();
   activeTrial = null;
   history = [];
   calibration = nextCalibration;
@@ -668,6 +678,7 @@ export async function resume(
   const generation = resumeGeneration;
   leaveChannel();
   stopPoll();
+  stopVisibilityTracking();
   activeTrial = null;
   history = [];
   calibration = nextCalibration;
@@ -868,6 +879,7 @@ export function dispose(): void {
   resumeGeneration += 1;
   stopPoll();
   leaveChannel();
+  stopVisibilityTracking();
   startInFlight = false;
   resumeInFlight = false;
   beginInFlight = false;

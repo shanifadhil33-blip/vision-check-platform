@@ -152,6 +152,12 @@ function applyLoopState(state: LoopState | null, status: string | null): void {
   }
 
   if (state !== null && state.phase === "awaiting_response") {
+    if (
+      cachedSnapshot.phase === "send_failed" &&
+      state.presentationId === cachedSnapshot.presentationId
+    ) {
+      return;
+    }
     const isNew = state.presentationId !== lastHandledPresentationId;
     if (isNew || cachedSnapshot.phase !== "choosing") {
       if (isNew) {

@@ -21,3 +21,15 @@ Files under `supabase/migrations` are the git record and are never executed. The
 4. Paste `fingerprint-rpc.sql`. Record the RPC baseline.
 
 `20260908140000_vcp_rpc_surface.rollback.sql` is emergency only. It drops the ten public RPCs and the tracking row for this version. It does not touch schema `vcp` or any table.
+
+## Run order — 20260922120000_vcp_privileges_tidy
+
+1. Paste `20260922120000_vcp_privileges_tidy.preflight.sql`. Read the verdict. Continue only if it is `SAFE TO APPLY`.
+2. Paste `20260922120000_vcp_privileges_tidy.apply.sql`.
+3. Paste `20260922120000_vcp_privileges_tidy.verify.sql`. Read the verdict. Continue only if it is `MIGRATION VERIFIED`.
+4. Paste `fingerprint-rpc.sql`. Record the RPC baseline (expected to change: fingerprint includes `proacl`).
+5. Paste `fingerprint.sql`. Confirm the table fingerprint is unchanged.
+
+Never run `supabase/migrations/20260922120000_vcp_privileges_tidy.sql` (git record only).
+
+Never run `20260922120000_vcp_privileges_tidy.rollback.sql` unless told. It is emergency only: it restores `service_role` EXECUTE on the ten RPCs and the residual default privileges measured on 22 September.

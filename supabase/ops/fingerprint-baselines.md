@@ -30,6 +30,13 @@ Each entry records the output of `supabase/ops/fingerprint.sql` after a verified
 - Live deny test: sqlstate 42501, permission denied for schema vcp
 - Idempotency proven: same response uuid returned twice, duplicate true on the second call
 
+## 20260922120000_vcp_privileges_tidy
+
+- Version: 20260922120000_vcp_privileges_tidy
+- Applied and verified: 2026-09-22
+- RPC fingerprint: 338e4c3f4c61750da458455147e1110c (was 030cd0f61921171ac8af1bdce623fc14; changed because proacl no longer includes service_role)
+- Table fingerprint: 9fecaa86562f6a2a9f42d916b52745c3 (unchanged)
+
 ## Parked
 
 - `vcp.calibrations.session_id` is a foreign key with no index. The only FK without one. Negligible at Phase A row counts.

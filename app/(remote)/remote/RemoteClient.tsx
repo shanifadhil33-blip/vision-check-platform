@@ -153,12 +153,13 @@ export default function RemoteClient({ sessionId }: Props) {
         </p>
         <button
           type="button"
+          disabled={snap.choiceLocked}
           onClick={() => {
             void retryFailed();
           }}
           className="min-h-14 w-full max-w-sm rounded-lg bg-amber-600 px-6 text-lg font-medium text-white hover:bg-amber-500 active:bg-amber-400"
         >
-          Tap to retry
+          {snap.choiceLocked ? "Sending…" : "Tap to retry"}
         </button>
       </main>
     );
@@ -173,12 +174,18 @@ export default function RemoteClient({ sessionId }: Props) {
     entry?.state === "sent";
   const selected = snap.selectedChoice;
   const dimOthers = selected !== null;
+  const sending = snap.choiceLocked && snap.selectedChoice !== null;
 
   return (
     <main className="flex flex-1 flex-col gap-3 px-4 py-6">
       <p className="text-center text-sm text-neutral-400">
         Which letter do you see?
       </p>
+      {sending && (
+        <p className="text-center text-sm text-neutral-200">
+          Sending your answer…
+        </p>
+      )}
       <div className="grid grid-cols-1 gap-3">
         {snap.choices.map((letter: SloanLetter) => {
           const isSelected =

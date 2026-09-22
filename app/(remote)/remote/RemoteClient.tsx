@@ -86,7 +86,10 @@ export default function RemoteClient({ sessionId }: Props) {
   if (snap.phase === "not_found") {
     return (
       <main className="flex flex-1 items-center justify-center px-6 text-center">
-        <p className="text-neutral-400">Session not found.</p>
+        <p className="text-neutral-400">
+          {snap.errorMessage ??
+            "This test has ended on the main screen. Scan the new code there to start again."}
+        </p>
       </main>
     );
   }
@@ -94,7 +97,10 @@ export default function RemoteClient({ sessionId }: Props) {
   if (snap.phase === "error") {
     return (
       <main className="flex flex-1 items-center justify-center px-6 text-center">
-        <p className="text-red-400">{snap.errorMessage ?? "Something went wrong."}</p>
+        <p className="text-red-400">
+          {snap.errorMessage ??
+            "Something went wrong connecting to the main screen. Reload this page to try again."}
+        </p>
       </main>
     );
   }
@@ -141,7 +147,10 @@ export default function RemoteClient({ sessionId }: Props) {
   if (snap.phase === "send_failed") {
     return (
       <main className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
-        <p className="text-red-400">{snap.errorMessage ?? "Send failed."}</p>
+        <p className="text-red-400">
+          {snap.errorMessage ??
+            "Something went wrong sending your answer. Tap to try again."}
+        </p>
         <button
           type="button"
           onClick={() => {

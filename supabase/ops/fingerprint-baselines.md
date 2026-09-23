@@ -37,6 +37,14 @@ Each entry records the output of `supabase/ops/fingerprint.sql` after a verified
 - RPC fingerprint: 338e4c3f4c61750da458455147e1110c (was 030cd0f61921171ac8af1bdce623fc14; changed because proacl no longer includes service_role)
 - Table fingerprint: 9fecaa86562f6a2a9f42d916b52745c3 (unchanged)
 
+## 20260923120000_vcp_get_answered_trials
+
+- Version: 20260923120000_vcp_get_answered_trials
+- Applied: 23 September 2026
+- Smoke test: passed
+- RPC surface fingerprint: 4174314eb9ad3ba7bbbf8cf2fa94e4df (was 338e4c3f4c61750da458455147e1110c; changed because vcp_get_answered_trials was added)
+- Table fingerprint: 9fecaa86562f6a2a9f42d916b52745c3 (unchanged)
+
 ## Parked
 
 - `vcp.calibrations.session_id` is a foreign key with no index. The only FK without one. Negligible at Phase A row counts.

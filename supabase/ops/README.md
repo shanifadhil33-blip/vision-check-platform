@@ -33,3 +33,16 @@ Files under `supabase/migrations` are the git record and are never executed. The
 Never run `supabase/migrations/20260922120000_vcp_privileges_tidy.sql` (git record only).
 
 Never run `20260922120000_vcp_privileges_tidy.rollback.sql` unless told. It is emergency only: it restores `service_role` EXECUTE on the ten RPCs and the residual default privileges measured on 22 September.
+
+## Run order — 20260923120000_vcp_get_answered_trials
+
+1. Paste `20260923120000_vcp_get_answered_trials.preflight.sql`. Read the verdict. Continue only if it is `SAFE TO APPLY`.
+2. Paste `20260923120000_vcp_get_answered_trials.apply.sql`.
+3. Paste `20260923120000_vcp_get_answered_trials.verify.sql`. Read the verdict. Continue only if it is `MIGRATION VERIFIED`.
+4. Paste `20260923120000_vcp_get_answered_trials.smoketest.sql`. Read the verdict. Continue only if it is `SMOKE TEST PASSED`.
+5. Paste `fingerprint-rpc.sql`. Record the RPC baseline (expected to change: new function).
+6. Paste `fingerprint.sql`. Confirm the table fingerprint is unchanged (`9fecaa86562f6a2a9f42d916b52745c3`).
+
+Never run `supabase/migrations/20260923120000_vcp_get_answered_trials.sql` (git record only).
+
+Never run `20260923120000_vcp_get_answered_trials.rollback.sql` unless told. It is emergency only: it drops `public.vcp_get_answered_trials(uuid)` and deletes the tracking row.

@@ -46,3 +46,16 @@ Never run `20260922120000_vcp_privileges_tidy.rollback.sql` unless told. It is e
 Never run `supabase/migrations/20260923120000_vcp_get_answered_trials.sql` (git record only).
 
 Never run `20260923120000_vcp_get_answered_trials.rollback.sql` unless told. It is emergency only: it drops `public.vcp_get_answered_trials(uuid)` and deletes the tracking row.
+
+## Run order — 20260924120000_vcp_sweep_abandoned_sessions
+
+1. Paste `20260924120000_vcp_sweep_abandoned_sessions.preflight.sql`. Read the verdict. Continue only if it is `SAFE TO APPLY`.
+2. Paste `20260924120000_vcp_sweep_abandoned_sessions.apply.sql`.
+3. Paste `20260924120000_vcp_sweep_abandoned_sessions.verify.sql`. Read the verdict. Continue only if it is `MIGRATION VERIFIED`.
+4. Paste `20260924120000_vcp_sweep_abandoned_sessions.smoketest.sql`. Read the verdict. Continue only if it is `SMOKE TEST PASSED`.
+5. Paste `fingerprint-rpc.sql`. Record the RPC baseline (may be unchanged: fingerprint hashes names, arguments, return type, flags and ACLs, not bodies).
+6. Paste `fingerprint.sql`. Confirm the table fingerprint is unchanged (`9fecaa86562f6a2a9f42d916b52745c3`).
+
+Never run `supabase/migrations/20260924120000_vcp_sweep_abandoned_sessions.sql` (git record only).
+
+Never run `20260924120000_vcp_sweep_abandoned_sessions.rollback.sql` unless told. It is emergency only: it restores the previous body of `public.vcp_create_session(integer, text)` and deletes the tracking row. Sessions already set to `abandoned` are not reopened.

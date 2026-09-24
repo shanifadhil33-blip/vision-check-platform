@@ -45,6 +45,15 @@ Each entry records the output of `supabase/ops/fingerprint.sql` after a verified
 - RPC surface fingerprint: 4174314eb9ad3ba7bbbf8cf2fa94e4df (was 338e4c3f4c61750da458455147e1110c; changed because vcp_get_answered_trials was added)
 - Table fingerprint: 9fecaa86562f6a2a9f42d916b52745c3 (unchanged)
 
+## 20260924120000_vcp_sweep_abandoned_sessions
+
+- Version: 20260924120000_vcp_sweep_abandoned_sessions
+- Applied: 24 September 2026
+- Verified and smoke test: passed
+- RPC surface fingerprint: 4174314eb9ad3ba7bbbf8cf2fa94e4df (unchanged; the fingerprint does not hash function bodies)
+- Table fingerprint: 9fecaa86562f6a2a9f42d916b52745c3 (unchanged)
+- Note: the first sweep closed every session left in created, paired, running or paused for more than 24 hours.
+
 ## Parked
 
 - `vcp.calibrations.session_id` is a foreign key with no index. The only FK without one. Negligible at Phase A row counts.

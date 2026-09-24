@@ -7,9 +7,11 @@ import {
   type VcpError,
 } from "./errors";
 import {
+  parseAnsweredTrials,
   parseSessionView,
   parseSubmitResult,
   parseVersionedStatus,
+  type AnsweredTrial,
   type PresentationPayload,
   type ResponseChoice,
   type SessionStatus,
@@ -61,6 +63,19 @@ export async function getSession(sessionId: string): Promise<RpcResult<SessionVi
       }),
     parseSessionView,
     "vcp_get_session returned an unexpected shape",
+  );
+}
+
+export async function getAnsweredTrials(
+  sessionId: string,
+): Promise<RpcResult<AnsweredTrial[]>> {
+  return callRpc(
+    () =>
+      getSupabaseBrowserClient().rpc("vcp_get_answered_trials", {
+        p_session_id: sessionId,
+      }),
+    parseAnsweredTrials,
+    "vcp_get_answered_trials returned an unexpected shape",
   );
 }
 

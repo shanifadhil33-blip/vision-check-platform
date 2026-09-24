@@ -244,6 +244,11 @@ export default function TestClient() {
       {snap.phase === "complete" && (
         <section className="flex flex-col gap-4">
           <h2 className="text-lg font-medium text-neutral-100">Results</h2>
+          {snap.historyLoadFailed && (
+            <p className="text-sm text-neutral-400">
+              Earlier answers could not be loaded here. They are still saved.
+            </p>
+          )}
           <table className="w-full border-collapse text-left text-sm">
             <thead>
               <tr className="border-b border-neutral-700 text-neutral-400">

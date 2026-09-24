@@ -12,7 +12,8 @@ import {
   renderableStepIndicesForTriplet,
 } from "@/lib/acuity/thinLoop";
 import type { SloanLetter } from "@/lib/acuity/sloan";
-import type { PresentationPayload } from "@/lib/db/payloads";
+import type { AnsweredTrial, PresentationPayload } from "@/lib/db/payloads";
+import { getAnsweredTrials } from "@/lib/db/rpc";
 import type { OptotypeMeasurement } from "@/app/(display)/display/optotype/OptotypeCanvas";
 import { joinSessionChannel, type SessionChannel } from "@/lib/session/channel";
 import {
@@ -22,6 +23,7 @@ import {
   readyState,
 } from "@/lib/session/loopState";
 import * as sessionStore from "@/lib/session/sessionStore";
+import { isResponseCorrect } from "./isResponseCorrect";
 import {
   setVisibilityPresentationId,
   startVisibilityTracking,
@@ -70,6 +72,7 @@ export type TestSnapshot = {
   cssPxPerMm: number | null;
   devicePixelRatio: number | null;
   history: readonly CompletedTrial[];
+  historyLoadFailed: boolean;
   errorMessage: string | null;
 };
 
@@ -103,6 +106,7 @@ const SERVER_SNAPSHOT: TestSnapshot = {
   cssPxPerMm: null,
   devicePixelRatio: null,
   history: [],
+  historyLoadFailed: false,
   errorMessage: null,
 };
 
@@ -245,6 +249,46 @@ function leaveChannel(): void {
   }
 }
 
+function completedTrialFromAnswered(row: AnsweredTrial): CompletedTrial {
+  const target = row.optotypes[row.targetIndex]!;
+  let leftFlanker: SloanLetter | null = null;
+  let rightFlanker: SloanLetter | null = null;
+  if (row.format === "flanked-triplet") {
+    leftFlanker = row.optotypes[row.targetIndex - 1]!;
+    rightFlanker = row.optotypes[row.targetIndex + 1]!;
+  }
+  return {
+    trialIndex: row.trialIndex,
+    stepIndex: row.logmarStepIndex,
+    target,
+    leftFlanker,
+    rightFlanker,
+    responseKind: row.responseKind,
+    responseLetter: row.responseLetter,
+    correct: isResponseCorrect(row.responseKind, row.responseLetter, target),
+  };
+}
+
+/**
+ * Rebuild the results list from the database. Failures leave history empty
+ * and set historyLoadFailed; the original error is logged by the caller.
+ */
+async function rebuildHistoryFromAnsweredTrials(sessionId: string): Promise<{
+  history: CompletedTrial[];
+  historyLoadFailed: boolean;
+  error: unknown | null;
+}> {
+  const result = await getAnsweredTrials(sessionId);
+  if (!result.ok) {
+    return { history: [], historyLoadFailed: true, error: result.error };
+  }
+  return {
+    history: result.data.map(completedTrialFromAnswered),
+    historyLoadFailed: false,
+    error: null,
+  };
+}
+
 /**
  * Advance only after a vcp_get_session read shows phase 'responded'
  * for the current presentation id.
@@ -287,8 +331,11 @@ async function tryAdvanceFromResponded(): Promise<void> {
       return;
     }
 
-    const correct =
-      state.responseKind === "letter" && state.responseLetter === trial.target;
+    const correct = isResponseCorrect(
+      state.responseKind,
+      state.responseLetter,
+      trial.target,
+    );
     history = [
       ...history,
       {
@@ -612,6 +659,7 @@ export async function start(
     cssPxPerMm: nextCalibration.cssPxPerMm,
     devicePixelRatio: nextCalibration.devicePixelRatio,
     history: [],
+    historyLoadFailed: false,
     errorMessage: null,
   });
 
@@ -696,6 +744,7 @@ export async function resume(
     cssPxPerMm: nextCalibration.cssPxPerMm,
     devicePixelRatio: nextCalibration.devicePixelRatio,
     history: [],
+    historyLoadFailed: false,
     errorMessage: null,
   });
 
@@ -765,6 +814,14 @@ export async function resume(
     }
 
     if (view.status === "complete") {
+      const rebuilt = await rebuildHistoryFromAnsweredTrials(view.id);
+      if (disposed || generation !== resumeGeneration) {
+        return;
+      }
+      if (rebuilt.error !== null) {
+        console.error(rebuilt.error);
+      }
+      history = rebuilt.history;
       patch({
         phase: "complete",
         format,
@@ -773,13 +830,23 @@ export async function resume(
         sessionId: view.id,
         remoteUrl: pairing.remoteUrl,
         qrDataUrl: pairing.qrDataUrl,
-        history: [],
+        history,
+        historyLoadFailed: rebuilt.historyLoadFailed,
         errorMessage: null,
       });
       return;
     }
 
     if (view.status === "running") {
+      const rebuilt = await rebuildHistoryFromAnsweredTrials(view.id);
+      if (disposed || generation !== resumeGeneration) {
+        return;
+      }
+      if (rebuilt.error !== null) {
+        console.error(rebuilt.error);
+      }
+      history = rebuilt.history;
+
       const loopState = parseLoopState(view.currentState);
       const nextTrialIndex = highestKnownTrialIndex(loopState) + 1;
 
@@ -790,6 +857,8 @@ export async function resume(
         sessionId: view.id,
         remoteUrl: pairing.remoteUrl,
         qrDataUrl: pairing.qrDataUrl,
+        history,
+        historyLoadFailed: rebuilt.historyLoadFailed,
         errorMessage: null,
       });
 

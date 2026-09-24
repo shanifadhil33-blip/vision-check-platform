@@ -33,6 +33,12 @@ export type Database = {
         };
         Returns: Json;
       };
+      vcp_get_answered_trials: {
+        Args: {
+          p_session_id: string;
+        };
+        Returns: Json;
+      };
       vcp_pair_session: {
         Args: {
           p_session_id: string;

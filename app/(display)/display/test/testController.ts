@@ -252,6 +252,7 @@ function patch(partial: Partial<TestSnapshot>): void {
 }
 
 function fail(message: string): void {
+  stopVisibilityTracking();
   patch({ phase: "error", errorMessage: message });
 }
 
@@ -350,6 +351,10 @@ async function tryAdvanceFromResponded(): Promise<void> {
   try {
     const loaded = await sessionStore.loadSession(sessionId);
     if (!loaded.ok || disposed) {
+      return;
+    }
+    if (loaded.data.status === "abandoned") {
+      showSessionEndedScreen(MSG_SESSION_ENDED);
       return;
     }
     if (cachedSnapshot.phase !== "awaiting_response") {

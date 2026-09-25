@@ -140,6 +140,42 @@ function setSessionIdInUrl(sessionId: string): void {
   window.history.replaceState(window.history.state, "", nextUrl);
 }
 
+function clearSessionIdFromUrl(): void {
+  window.history.replaceState(window.history.state, "", window.location.pathname);
+}
+
+const MSG_SESSION_ENDED =
+  "This test has ended. Start a new test to continue.";
+const MSG_SESSION_CANNOT_CONTINUE =
+  "This test cannot be continued. Start a new test to continue.";
+
+/**
+ * Plain ended screen: start controls available, session cleared from the
+ * address bar so a refresh does not reopen it. No further writes.
+ */
+function showSessionEndedScreen(message: string): void {
+  stopPoll();
+  leaveChannel();
+  stopVisibilityTracking();
+  activeTrial = null;
+  clearSessionIdFromUrl();
+  sessionStore.reset();
+  patch({
+    phase: "error",
+    sessionId: null,
+    remoteUrl: null,
+    qrDataUrl: null,
+    currentTrialIndex: null,
+    currentStepIndex: null,
+    currentTarget: null,
+    currentLeftFlanker: null,
+    currentRightFlanker: null,
+    history: [],
+    historyLoadFailed: false,
+    errorMessage: message,
+  });
+}
+
 function formatFromCurrentState(currentState: unknown): SessionFormat | null {
   if (currentState === null || typeof currentState !== "object" || Array.isArray(currentState)) {
     return null;
@@ -393,6 +429,11 @@ async function onSessionNudgeOrPoll(): Promise<void> {
 
   const loaded = await sessionStore.loadSession(sessionId);
   if (!loaded.ok || disposed) {
+    return;
+  }
+
+  if (loaded.data.status === "abandoned") {
+    showSessionEndedScreen(MSG_SESSION_ENDED);
     return;
   }
 
@@ -760,6 +801,22 @@ export async function resume(
     }
 
     const view = loaded.data;
+
+    if (view.status === "abandoned") {
+      showSessionEndedScreen(MSG_SESSION_ENDED);
+      return;
+    }
+
+    if (
+      view.status !== "created" &&
+      view.status !== "paired" &&
+      view.status !== "complete" &&
+      view.status !== "running"
+    ) {
+      showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE);
+      return;
+    }
+
     const distanceMm = view.distanceMmRequested;
     if (distanceMm === null) {
       fail("This session has no viewing distance stored.");
@@ -837,72 +894,68 @@ export async function resume(
       return;
     }
 
-    if (view.status === "running") {
-      const rebuilt = await rebuildHistoryFromAnsweredTrials(view.id);
-      if (disposed || generation !== resumeGeneration) {
-        return;
-      }
-      if (rebuilt.error !== null) {
-        console.error(rebuilt.error);
-      }
-      history = rebuilt.history;
+    // view.status === "running"
+    const rebuilt = await rebuildHistoryFromAnsweredTrials(view.id);
+    if (disposed || generation !== resumeGeneration) {
+      return;
+    }
+    if (rebuilt.error !== null) {
+      console.error(rebuilt.error);
+    }
+    history = rebuilt.history;
 
-      const loopState = parseLoopState(view.currentState);
-      const nextTrialIndex = highestKnownTrialIndex(loopState) + 1;
+    const loopState = parseLoopState(view.currentState);
+    const nextTrialIndex = highestKnownTrialIndex(loopState) + 1;
 
-      patch({
-        format,
-        formatSource,
-        distanceMm,
-        sessionId: view.id,
-        remoteUrl: pairing.remoteUrl,
-        qrDataUrl: pairing.qrDataUrl,
-        history,
-        historyLoadFailed: rebuilt.historyLoadFailed,
-        errorMessage: null,
-      });
+    patch({
+      format,
+      formatSource,
+      distanceMm,
+      sessionId: view.id,
+      remoteUrl: pairing.remoteUrl,
+      qrDataUrl: pairing.qrDataUrl,
+      history,
+      historyLoadFailed: rebuilt.historyLoadFailed,
+      errorMessage: null,
+    });
 
-      const ready = await sessionStore.setState("running", readyState());
-      if (!ready.ok) {
-        fail(ready.error.message);
-        return;
-      }
-      if (disposed || generation !== resumeGeneration) {
+    const ready = await sessionStore.setState("running", readyState());
+    if (!ready.ok) {
+      fail(ready.error.message);
+      return;
+    }
+    if (disposed || generation !== resumeGeneration) {
+      return;
+    }
+    if (channel !== null) {
+      await channel.sendNudge("running");
+    }
+
+    if (nextTrialIndex >= stepIndices.length) {
+      const done = await sessionStore.setState(
+        "complete",
+        completeState(history.length),
+      );
+      if (!done.ok) {
+        fail(done.error.message);
         return;
       }
       if (channel !== null) {
-        await channel.sendNudge("running");
+        await channel.sendNudge("complete");
       }
-
-      if (nextTrialIndex >= stepIndices.length) {
-        const done = await sessionStore.setState(
-          "complete",
-          completeState(history.length),
-        );
-        if (!done.ok) {
-          fail(done.error.message);
-          return;
-        }
-        if (channel !== null) {
-          await channel.sendNudge("complete");
-        }
-        patch({
-          phase: "complete",
-          currentTrialIndex: null,
-          currentStepIndex: null,
-          currentTarget: null,
-          currentLeftFlanker: null,
-          currentRightFlanker: null,
-          history,
-        });
-        return;
-      }
-
-      await presentTrialAt(nextTrialIndex);
+      patch({
+        phase: "complete",
+        currentTrialIndex: null,
+        currentStepIndex: null,
+        currentTarget: null,
+        currentLeftFlanker: null,
+        currentRightFlanker: null,
+        history,
+      });
       return;
     }
 
-    fail(`Cannot resume a session in status "${view.status}".`);
+    await presentTrialAt(nextTrialIndex);
   } finally {
     resumeInFlight = false;
   }

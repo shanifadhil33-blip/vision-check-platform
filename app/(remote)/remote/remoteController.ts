@@ -138,7 +138,26 @@ function leaveChannel(): void {
   }
 }
 
+function showSessionEnded(): void {
+  stopPoll();
+  leaveChannel();
+  patch({
+    phase: "not_found",
+    choices: [],
+    presentationId: null,
+    trialIndex: null,
+    choiceLocked: false,
+    errorMessage: MSG_SESSION_ENDED,
+    selectedChoice: null,
+  });
+}
+
 function applyLoopState(state: LoopState | null, status: string | null): void {
+  if (status === "abandoned") {
+    showSessionEnded();
+    return;
+  }
+
   if (status === "complete" || (state !== null && state.phase === "complete")) {
     patch({
       phase: "complete",
@@ -220,7 +239,7 @@ async function refreshFromServer(): Promise<void> {
   if (!loaded.ok) {
     if (loaded.error.kind === "session-not-found") {
       console.error(loaded.error);
-      patch({ phase: "not_found", errorMessage: MSG_SESSION_ENDED });
+      showSessionEnded();
       return;
     }
     return;
@@ -277,10 +296,15 @@ export async function bootstrap(sessionId: string): Promise<void> {
   if (!loaded.ok) {
     if (loaded.error.kind === "session-not-found") {
       console.error(loaded.error);
-      patch({ phase: "not_found", errorMessage: MSG_SESSION_ENDED });
+      showSessionEnded();
       return;
     }
     failWithError(loaded.error, "connect");
+    return;
+  }
+
+  if (loaded.data.status === "abandoned") {
+    showSessionEnded();
     return;
   }
 
@@ -351,7 +375,10 @@ async function writeRespondedOnce(
       }
       return { failKind: reloaded.error.kind, original: reloaded.error };
     }
-    if (reloaded.data.status === "complete") {
+    if (
+      reloaded.data.status === "complete" ||
+      reloaded.data.status === "abandoned"
+    ) {
       return { failKind: "session-not-found", original: reloaded.data };
     }
     const state = parseLoopState(reloaded.data.currentState);
@@ -442,6 +469,10 @@ export async function answer(choice: ResponseChoice): Promise<void> {
       );
       if (!submitted.ok) {
         console.error(submitted.error);
+        if (submitted.error.kind === "session-not-found") {
+          showSessionEnded();
+          return;
+        }
         patch({
           phase: "send_failed",
           choiceLocked: false,
@@ -480,6 +511,10 @@ export async function answer(choice: ResponseChoice): Promise<void> {
     );
     if (!wrote.ok) {
       console.error(wrote.original);
+      if (wrote.kind === "session-not-found") {
+        showSessionEnded();
+        return;
+      }
       patch({
         phase: "send_failed",
         choiceLocked: false,

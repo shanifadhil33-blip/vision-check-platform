@@ -54,6 +54,15 @@ Each entry records the output of `supabase/ops/fingerprint.sql` after a verified
 - Table fingerprint: 9fecaa86562f6a2a9f42d916b52745c3 (unchanged)
 - Note: the first sweep closed every session left in created, paired, running or paused for more than 24 hours.
 
+## 20260926120000_vcp_calibrations_method_ruler_bar
+
+- Version: 20260926120000_vcp_calibrations_method_ruler_bar
+- Applied: 27 September 2026
+- Preflight: SAFE TO APPLY. Verify: MIGRATION VERIFIED, 5 of 5. Smoke test: SMOKE TEST PASSED, 4 of 4 (ruler-bar accepted, bogus rejected with 23514 on calibrations_method_chk, card-id1 accepted, test session removed)
+- RPC surface fingerprint: 4174314eb9ad3ba7bbbf8cf2fa94e4df (unchanged)
+- Table fingerprint: c9a26c7a6ec5def009a47167f889db5b (was 9fecaa86562f6a2a9f42d916b52745c3; changed because calibrations_method_chk now allows 'card-id1' and 'ruler-bar')
+- Note: vcp.calibrations held 27 rows before and after.
+
 ## Parked
 
 - `vcp.calibrations.session_id` is a foreign key with no index. The only FK without one. Negligible at Phase A row counts.

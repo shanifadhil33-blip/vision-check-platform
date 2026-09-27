@@ -12,13 +12,34 @@ export {
   pixelPitchMm,
   screenPhysicalSizeMm,
 } from "./pxPerMm";
+export { formatDiagnosticsLine } from "./diagnostics";
+export {
+  MATCH_AGREEMENT_LIMIT_PERCENT,
+  disagreementPercent,
+  evaluateMatches,
+} from "./matchAgreement";
+export type { MatchEvaluation } from "./matchAgreement";
+export {
+  START_MIN_SEPARATION_PERCENT,
+  START_OFFSET_MAX_FRACTION,
+  START_OFFSET_MIN_FRACTION,
+  pickStartWidthCssPx,
+} from "./matchStart";
 export { isPlausiblePixelPitch } from "./plausibility";
+export {
+  RULER_BAR_TARGET_MM,
+  cssPxPerMmFromRulerBar,
+  rulerBarCssPx,
+} from "./rulerBar";
 export type {
   Calibration,
   CalibrationMethod,
   CalibrationVerification,
+  CardMatchAgreement,
+  CardMatchAttempt,
   DeviceContext,
   PlausibilityResult,
+  RulerBarMeasurement,
   ValidityResult,
 } from "./types";
 export { isCalibrationStillValid } from "./validity";

@@ -1,6 +1,6 @@
 # /lib/calibration
 
-Pure TypeScript. Nothing lives here yet.
+Pure TypeScript for card size, pixel pitch, plausibility, validity, zoom, two-match agreement, the next match's start width, ruler-bar calibration, and the diagnostics line.
 
 Per AGENTS.md rule 1, modules in this folder must not import from `react` or `next`, and must not touch `window`, `document` or `navigator`. They take numbers and return numbers so they can be unit tested without a browser. ESLint enforces this.
 

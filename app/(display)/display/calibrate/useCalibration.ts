@@ -59,19 +59,78 @@ function isCalibrationRecord(value: unknown): value is Calibration {
     return false;
   }
   const record = value as Record<string, unknown>;
-  return (
-    typeof record.cssPxPerMm === "number" &&
-    typeof record.cardWidthCssPx === "number" &&
-    typeof record.devicePixelRatio === "number" &&
-    typeof record.viewportWidthCssPx === "number" &&
-    typeof record.viewportHeightCssPx === "number" &&
-    typeof record.screenWidthCssPx === "number" &&
-    typeof record.screenHeightCssPx === "number" &&
-    typeof record.userAgent === "string" &&
-    typeof record.createdAtIso === "string" &&
-    record.method === "card-id1" &&
-    Array.isArray(record.verifications)
-  );
+  if (
+    typeof record.cssPxPerMm !== "number" ||
+    typeof record.cardWidthCssPx !== "number" ||
+    typeof record.devicePixelRatio !== "number" ||
+    typeof record.viewportWidthCssPx !== "number" ||
+    typeof record.viewportHeightCssPx !== "number" ||
+    typeof record.screenWidthCssPx !== "number" ||
+    typeof record.screenHeightCssPx !== "number" ||
+    typeof record.userAgent !== "string" ||
+    typeof record.createdAtIso !== "string" ||
+    (record.method !== "card-id1" && record.method !== "ruler-bar") ||
+    !Array.isArray(record.verifications)
+  ) {
+    return false;
+  }
+
+  if ("cardMatchAttempts" in record) {
+    const attempts = record.cardMatchAttempts;
+    if (!Array.isArray(attempts)) {
+      return false;
+    }
+    for (const item of attempts) {
+      if (item === null || typeof item !== "object") {
+        return false;
+      }
+      const attempt = item as Record<string, unknown>;
+      if (
+        typeof attempt.round !== "number" ||
+        typeof attempt.startCardWidthCssPx !== "number" ||
+        typeof attempt.cardWidthCssPx !== "number" ||
+        typeof attempt.devicePixelRatio !== "number" ||
+        typeof attempt.confirmedAtIso !== "string"
+      ) {
+        return false;
+      }
+    }
+  }
+
+  if ("cardMatchAgreement" in record) {
+    const agreement = record.cardMatchAgreement;
+    if (agreement === null || typeof agreement !== "object") {
+      return false;
+    }
+    const agreementRecord = agreement as Record<string, unknown>;
+    const indexes = agreementRecord.usedAttemptIndexes;
+    if (
+      !Array.isArray(indexes) ||
+      indexes.length !== 2 ||
+      typeof indexes[0] !== "number" ||
+      typeof indexes[1] !== "number" ||
+      typeof agreementRecord.disagreementPercent !== "number"
+    ) {
+      return false;
+    }
+  }
+
+  if ("rulerBar" in record) {
+    const rulerBar = record.rulerBar;
+    if (rulerBar === null || typeof rulerBar !== "object") {
+      return false;
+    }
+    const rulerBarRecord = rulerBar as Record<string, unknown>;
+    if (
+      typeof rulerBarRecord.barCssPx !== "number" ||
+      typeof rulerBarRecord.measuredMm !== "number" ||
+      typeof rulerBarRecord.createdAtIso !== "string"
+    ) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function readStoredCalibration(): Calibration | null {

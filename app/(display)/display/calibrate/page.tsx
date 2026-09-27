@@ -14,8 +14,8 @@ export default async function CalibratePage({
       <header className="w-full max-w-3xl text-left">
         <h1 className="text-2xl font-semibold text-neutral-100">Screen calibration</h1>
         <p className="mt-2 text-neutral-400">
-          Every physical size in this application comes from this step. Match a bank card to the
-          outline, then check the result with a ruler.
+          Every physical size in this application comes from this step. You&apos;ll match a bank
+          card to the outline twice.
         </p>
         <p className="mt-3 text-sm text-neutral-500">
           Best viewed in Chrome, Edge, Safari or Firefox at 100% zoom. Press Ctrl+0 (Cmd+0 on Mac)

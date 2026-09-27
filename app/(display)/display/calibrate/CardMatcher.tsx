@@ -3,33 +3,32 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import {
   CARD_CORNER_RADIUS_MM,
-  CARD_WIDTH_MM,
   cardHeightCssPxFromWidth,
   cssPxPerMmFromCardWidth,
   isPlausiblePixelPitch,
   mmToCssPx,
+  formatDiagnosticsLine,
   pixelPitchMm,
   screenPhysicalSizeMm,
   zoomSignal,
-  type Calibration,
   type DeviceContext,
 } from "@/lib/calibration";
-import { CARD_ZONE_MARGIN_CSS_PX, CardZone } from "./CardZone";
+import { CardZone } from "./CardZone";
 import { CardWidthSteppers } from "./CardWidthSteppers";
-
-const MIN_CARD_WIDTH_CSS_PX = 120;
-const ABSOLUTE_MAX_CARD_WIDTH_CSS_PX = 900;
-/** Starting guess: 4.0 CSS px per mm. */
-const DEFAULT_CARD_WIDTH_CSS_PX = Math.round(4 * CARD_WIDTH_MM);
-
-const PINCH_ZOOM_MESSAGE =
-  "The page is zoomed in. Use two fingers to zoom back to normal size, then press Confirm again.";
+import {
+  clampCardWidthCssPx,
+  maxCardWidthCssPx as viewportMaxCardWidthCssPx,
+  MIN_CARD_WIDTH_CSS_PX,
+} from "./cardWidthLimits";
+import { isPinchZoomed, PINCH_ZOOM_MESSAGE } from "./pinchGuard";
 
 type CardMatcherProps = {
   deviceContext: DeviceContext;
   outerWidthCssPx: number;
   showDiagnostics: boolean;
-  onConfirm: (calibration: Calibration) => void;
+  startCardWidthCssPx: number;
+  matchLabel: string;
+  onConfirm: (result: { cardWidthCssPx: number }) => void;
   onCancel?: (() => void) | undefined;
 };
 
@@ -37,28 +36,21 @@ export function CardMatcher({
   deviceContext,
   outerWidthCssPx,
   showDiagnostics,
+  startCardWidthCssPx,
+  matchLabel,
   onConfirm,
   onCancel,
 }: CardMatcherProps) {
   const sliderRef = useRef<HTMLInputElement>(null);
   const [pinchBlockedMessage, setPinchBlockedMessage] = useState<string | null>(null);
 
-  const maxCardWidthCssPx = Math.min(
-    ABSOLUTE_MAX_CARD_WIDTH_CSS_PX,
-    Math.max(
-      MIN_CARD_WIDTH_CSS_PX,
-      deviceContext.viewportWidthCssPx - CARD_ZONE_MARGIN_CSS_PX * 2,
-    ),
-  );
+  const maxCardWidthCssPx = viewportMaxCardWidthCssPx(deviceContext.viewportWidthCssPx);
 
   const [cardWidthCssPx, setCardWidthCssPx] = useState(() =>
-    Math.min(DEFAULT_CARD_WIDTH_CSS_PX, Math.max(MIN_CARD_WIDTH_CSS_PX, maxCardWidthCssPx)),
+    clampCardWidthCssPx(startCardWidthCssPx, maxCardWidthCssPx),
   );
 
-  const clampedCardWidthCssPx = Math.min(
-    maxCardWidthCssPx,
-    Math.max(MIN_CARD_WIDTH_CSS_PX, cardWidthCssPx),
-  );
+  const clampedCardWidthCssPx = clampCardWidthCssPx(cardWidthCssPx, maxCardWidthCssPx);
 
   const cssPxPerMm = cssPxPerMmFromCardWidth(clampedCardWidthCssPx);
   const heightCssPx = cardHeightCssPxFromWidth(clampedCardWidthCssPx);
@@ -91,7 +83,7 @@ export function CardMatcher({
   }, []);
 
   function clampWidth(nextCssPx: number): number {
-    return Math.min(maxCardWidthCssPx, Math.max(MIN_CARD_WIDTH_CSS_PX, nextCssPx));
+    return clampCardWidthCssPx(nextCssPx, maxCardWidthCssPx);
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLInputElement>): void {
@@ -107,36 +99,18 @@ export function CardMatcher({
   }
 
   function handleConfirm(): void {
-    const visualViewport = window.visualViewport;
-    if (
-      visualViewport !== null &&
-      visualViewport !== undefined &&
-      (visualViewport.scale < 0.99 || visualViewport.scale > 1.01)
-    ) {
+    if (isPinchZoomed()) {
       setPinchBlockedMessage(PINCH_ZOOM_MESSAGE);
       return;
     }
     setPinchBlockedMessage(null);
-
-    const calibration: Calibration = {
-      cssPxPerMm,
-      cardWidthCssPx: clampedCardWidthCssPx,
-      devicePixelRatio: deviceContext.devicePixelRatio,
-      viewportWidthCssPx: deviceContext.viewportWidthCssPx,
-      viewportHeightCssPx: deviceContext.viewportHeightCssPx,
-      screenWidthCssPx: deviceContext.screenWidthCssPx,
-      screenHeightCssPx: deviceContext.screenHeightCssPx,
-      userAgent: deviceContext.userAgent,
-      createdAtIso: new Date().toISOString(),
-      method: "card-id1",
-      verifications: [],
-    };
-    onConfirm(calibration);
+    onConfirm({ cardWidthCssPx: clampedCardWidthCssPx });
   }
 
   return (
     <section className="flex w-full max-w-3xl flex-col items-center gap-8">
       <div className="flex w-full flex-col gap-3 text-left">
+        <p className="w-fit rounded-full bg-sky-500/15 px-3 py-1 text-base font-semibold text-sky-300">{matchLabel}</p>
         <h2 className="text-xl font-semibold text-neutral-100">Match your bank card</h2>
         <ol className="list-decimal space-y-2 pl-5 text-neutral-300">
           <li>Hold a bank card flat against the screen, over the outline.</li>
@@ -259,16 +233,16 @@ export function CardMatcher({
         )}
         {showDiagnostics ? (
           <p className="mt-2 font-mono text-xs text-neutral-500">
-            {[
-              `DPR ${deviceContext.devicePixelRatio.toFixed(3)}`,
-              `${cssPxPerMm.toFixed(4)} CSS px/mm`,
-              `pitch ${pitchMm.toFixed(4)} mm`,
-              `card ${clampedCardWidthCssPx.toFixed(1)} CSS px`,
-              showSizeEstimate
-                ? `screen ${screenSize.widthMm.toFixed(0)}×${screenSize.heightMm.toFixed(0)} mm (${screenSize.diagonalInches.toFixed(1)} in)`
-                : "screen size withheld",
-              `viewport ${deviceContext.viewportWidthCssPx}×${deviceContext.viewportHeightCssPx} CSS px`,
-            ].join(" · ")}
+            {formatDiagnosticsLine({
+              devicePixelRatio: deviceContext.devicePixelRatio,
+              cssPxPerMm,
+              cardWidthCssPx: clampedCardWidthCssPx,
+              screenWidthCssPx: deviceContext.screenWidthCssPx,
+              screenHeightCssPx: deviceContext.screenHeightCssPx,
+              viewportWidthCssPx: deviceContext.viewportWidthCssPx,
+              viewportHeightCssPx: deviceContext.viewportHeightCssPx,
+              includeScreenSize: showSizeEstimate,
+            })}
           </p>
         ) : null}
         {!plausibility.ok ? (

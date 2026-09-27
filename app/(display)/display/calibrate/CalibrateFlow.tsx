@@ -1,42 +1,23 @@
 "use client";
 
 import { useState } from "react";
-import { pixelPitchMm, screenPhysicalSizeMm, zoomSignal } from "@/lib/calibration";
-import { CardMatcher } from "./CardMatcher";
+import { formatDiagnosticsLine, zoomSignal, type Calibration } from "@/lib/calibration";
+import { CardMatchFlow } from "./CardMatchFlow";
 import { useCalibration } from "./useCalibration";
 import { VerifyStep } from "./VerifyStep";
 
-function diagnosticsLine(input: {
-  devicePixelRatio: number;
-  cssPxPerMm: number;
-  cardWidthCssPx: number;
-  screenWidthCssPx: number;
-  screenHeightCssPx: number;
-  viewportWidthCssPx: number;
-  viewportHeightCssPx: number;
-  includeScreenSize: boolean;
-}): string {
-  const pitchMm = pixelPitchMm(input.cssPxPerMm, input.devicePixelRatio);
-  const parts = [
-    `DPR ${input.devicePixelRatio.toFixed(3)}`,
-    `${input.cssPxPerMm.toFixed(4)} CSS px/mm`,
-    `pitch ${pitchMm.toFixed(4)} mm`,
-    `card ${input.cardWidthCssPx.toFixed(1)} CSS px`,
-  ];
-  if (input.includeScreenSize) {
-    const screenSize = screenPhysicalSizeMm(
-      input.screenWidthCssPx,
-      input.screenHeightCssPx,
-      input.cssPxPerMm,
-    );
-    parts.push(
-      `screen ${screenSize.widthMm.toFixed(0)}×${screenSize.heightMm.toFixed(0)} mm (${screenSize.diagonalInches.toFixed(1)} in)`,
-    );
-  } else {
-    parts.push("screen size withheld");
+function savedCalibrationDetailLine(calibration: Calibration): string {
+  let line = `method ${calibration.method}`;
+  const agreement = calibration.cardMatchAgreement;
+  if (agreement !== undefined) {
+    const attemptCount = calibration.cardMatchAttempts?.length ?? 0;
+    line += ` · matches ${agreement.usedAttemptIndexes[0]} and ${agreement.usedAttemptIndexes[1]} of ${attemptCount} · ${agreement.disagreementPercent.toFixed(2)}%`;
   }
-  parts.push(`viewport ${input.viewportWidthCssPx}×${input.viewportHeightCssPx} CSS px`);
-  return parts.join(" · ");
+  const rulerBar = calibration.rulerBar;
+  if (rulerBar !== undefined) {
+    line += ` · bar ${rulerBar.barCssPx} CSS px · measured ${rulerBar.measuredMm.toFixed(1)} mm`;
+  }
+  return line;
 }
 
 type CalibrateFlowProps = {
@@ -75,11 +56,11 @@ export function CalibrateFlow({ showDiagnostics }: CalibrateFlowProps) {
             <p className="mt-1 text-sm text-amber-200/90">{validity.reason}</p>
           </div>
         ) : null}
-        <CardMatcher
+        <CardMatchFlow
           deviceContext={deviceContext}
           outerWidthCssPx={outerWidthCssPx}
           showDiagnostics={showDiagnostics}
-          onConfirm={(next) => {
+          onSave={(next) => {
             save(next);
             setIsRecalibrating(false);
           }}
@@ -112,7 +93,12 @@ export function CalibrateFlow({ showDiagnostics }: CalibrateFlowProps) {
         )}
         {showDiagnostics ? (
           <p className="mt-1 font-mono text-xs text-neutral-500">
-            {diagnosticsLine({ ...calibration, includeScreenSize })}
+            {formatDiagnosticsLine({ ...calibration, includeScreenSize })}
+          </p>
+        ) : null}
+        {showDiagnostics ? (
+          <p className="mt-1 font-mono text-xs text-neutral-500">
+            {savedCalibrationDetailLine(calibration)}
           </p>
         ) : null}
         <button
@@ -127,12 +113,14 @@ export function CalibrateFlow({ showDiagnostics }: CalibrateFlowProps) {
           screen.
         </p>
       </div>
-      <VerifyStep
-        calibration={calibration}
-        showDiagnostics={showDiagnostics}
-        onVerified={addVerification}
-        onRecalibrate={() => setIsRecalibrating(true)}
-      />
+      {showDiagnostics ? (
+        <VerifyStep
+          calibration={calibration}
+          showDiagnostics={showDiagnostics}
+          onVerified={addVerification}
+          onRecalibrate={() => setIsRecalibrating(true)}
+        />
+      ) : null}
     </div>
   );
 }

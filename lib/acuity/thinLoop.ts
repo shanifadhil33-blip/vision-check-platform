@@ -3,61 +3,7 @@
  * Pure numbers / letters in — no browser APIs (AGENTS.md rule 1).
  */
 
-import { letterHeightMmForLogMar } from "./logmar";
-import { canRenderLogMar } from "./renderableRange";
 import { SLOAN_LETTERS, type SloanLetter } from "./sloan";
-
-/** logMAR step indices offered in order: 0.5 → 0.0. */
-export const THIN_LOOP_STEP_INDICES: readonly number[] = [5, 4, 3, 2, 1, 0];
-
-/**
- * Keep only step indices whose logMAR (index / 10) passes the Carkeet floor
- * for the given distance and physical pixel pitch.
- */
-export function renderableStepIndices(
-  distanceMm: number,
-  pixelPitchMmValue: number,
-): number[] {
-  return THIN_LOOP_STEP_INDICES.filter((stepIndex) =>
-    canRenderLogMar(stepIndex / 10, distanceMm, pixelPitchMmValue),
-  );
-}
-
-/**
- * Triplet steps must also fit canvas 5L wide and L+48 tall inside the viewport
- * margins (viewport sizes are plain numbers measured once at Start).
- */
-export function renderableStepIndicesForTriplet(
-  distanceMm: number,
-  pixelPitchMmValue: number,
-  cssPxPerMm: number,
-  viewportWidthCssPx: number,
-  viewportHeightCssPx: number,
-): number[] {
-  return THIN_LOOP_STEP_INDICES.filter((stepIndex) => {
-    if (!canRenderLogMar(stepIndex / 10, distanceMm, pixelPitchMmValue)) {
-      return false;
-    }
-    const letterHeightCssPx =
-      letterHeightMmForLogMar(stepIndex / 10, distanceMm) * cssPxPerMm;
-    if (5 * letterHeightCssPx > viewportWidthCssPx - 64) {
-      return false;
-    }
-    if (letterHeightCssPx + 48 > viewportHeightCssPx - 64) {
-      return false;
-    }
-    return true;
-  });
-}
-
-export function pickTarget(random: () => number): SloanLetter {
-  const index = Math.floor(random() * SLOAN_LETTERS.length);
-  const letter = SLOAN_LETTERS[index];
-  if (letter === undefined) {
-    return SLOAN_LETTERS[0];
-  }
-  return letter;
-}
 
 /**
  * Two flankers, each different from the target and from each other.

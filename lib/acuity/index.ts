@@ -65,5 +65,5 @@ export { CUSTOMER_LABELS, customerLabelForStep } from "./resultLabel";
 
 export { isResponseCorrect } from "./isResponseCorrect";
 
-export { notSureCount, replayRun, testQualityPayload } from "./testRun";
+export { notSureCount, replayRun, setupCheck, testQualityPayload } from "./testRun";
 export type { ReplayRunResult, ReplayTrial, TestQualityPayload } from "./testRun";

@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { RunContext } from "../session/loopState";
 import type { SloanLetter } from "./sloan";
-import { notSureCount, replayRun, testQualityPayload, type ReplayTrial } from "./testRun";
+import {
+  notSureCount,
+  replayRun,
+  setupCheck,
+  testQualityPayload,
+  type ReplayTrial,
+} from "./testRun";
 
 const FULL_STEPS = [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
@@ -257,5 +263,90 @@ describe("testQualityPayload", () => {
     expect(payload).not.toHaveProperty("final_logmar_step_index");
     expect(payload).not.toHaveProperty("final_snellen_label");
     expect(payload.bounded_result_reason).toBe("not-measurable");
+  });
+
+  it("Q5 reports a measured result as measured when the finest level is limited by screen resolution", () => {
+    const payload = testQualityPayload({
+      result: { kind: "measured", stepIndex: 2 },
+      run: runWith({
+        stepIndices: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        finestLimitedBy: "screen-resolution",
+      }),
+      distanceMm: 2000,
+      notSureCount: 0,
+    });
+    expect(payload.screen_limited).toBe(false);
+    expect(payload.bounded_result_reason).toBe("measured");
+    expect(payload.final_snellen_label).toBe("6/9");
+  });
+});
+
+describe("setupCheck", () => {
+  const drawable = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+  it("S1 returns ok when validity, zoom and the current step all pass", () => {
+    expect(
+      setupCheck({
+        validityOk: true,
+        zoomState: "default",
+        drawableStepIndices: drawable,
+        currentStepIndex: 3,
+      }),
+    ).toBe("ok");
+  });
+
+  it("S2 returns calibration before zoom or window when validity has failed", () => {
+    expect(
+      setupCheck({
+        validityOk: false,
+        zoomState: "not-default",
+        drawableStepIndices: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        currentStepIndex: 0,
+      }),
+    ).toBe("calibration");
+  });
+
+  it("S3 returns zoom when zoom is not default and the rest is fine", () => {
+    expect(
+      setupCheck({
+        validityOk: true,
+        zoomState: "not-default",
+        drawableStepIndices: drawable,
+        currentStepIndex: 3,
+      }),
+    ).toBe("zoom");
+  });
+
+  it("S4 returns ok when zoom is unknown and the rest is fine", () => {
+    expect(
+      setupCheck({
+        validityOk: true,
+        zoomState: "unknown",
+        drawableStepIndices: drawable,
+        currentStepIndex: 3,
+      }),
+    ).toBe("ok");
+  });
+
+  it("S5 returns window when the current step is not drawable", () => {
+    expect(
+      setupCheck({
+        validityOk: true,
+        zoomState: "default",
+        drawableStepIndices: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        currentStepIndex: 0,
+      }),
+    ).toBe("window");
+  });
+
+  it("S6 returns ok when there is no current step, even if nothing is drawable", () => {
+    expect(
+      setupCheck({
+        validityOk: true,
+        zoomState: "default",
+        drawableStepIndices: [],
+        currentStepIndex: null,
+      }),
+    ).toBe("ok");
   });
 });

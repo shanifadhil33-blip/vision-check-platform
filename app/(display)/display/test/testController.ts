@@ -4,16 +4,25 @@ import {
   letterHeightMmForLogMar,
   strokeWidthMmForLogMar,
 } from "@/lib/acuity/logmar";
-import {
-  buildTrialChoices,
-  pickFlankers,
-  pickTarget,
-  renderableStepIndices,
-  renderableStepIndicesForTriplet,
-} from "@/lib/acuity/thinLoop";
+import { buildTrialChoices, pickFlankers } from "@/lib/acuity/thinLoop";
 import type { SloanLetter } from "@/lib/acuity/sloan";
+import { computeTestLevels } from "@/lib/acuity/testLevels";
+import {
+  pickNextTarget,
+  recordTrial,
+  startStaircase,
+  type StaircaseState,
+} from "@/lib/acuity/staircase";
+import {
+  notSureCount,
+  replayRun,
+  setupCheck,
+  testQualityPayload,
+} from "@/lib/acuity/testRun";
+import type { VcpError } from "@/lib/db/errors";
 import type { AnsweredTrial, PresentationPayload } from "@/lib/db/payloads";
 import { getAnsweredTrials } from "@/lib/db/rpc";
+import type { Json } from "@/lib/db/types";
 import type { OptotypeMeasurement } from "@/app/(display)/display/optotype/OptotypeCanvas";
 import { joinSessionChannel, type SessionChannel } from "@/lib/session/channel";
 import {
@@ -21,6 +30,9 @@ import {
   completeState,
   parseLoopState,
   readyState,
+  type LoopState,
+  type RunContext,
+  type RunResult,
 } from "@/lib/session/loopState";
 import * as sessionStore from "@/lib/session/sessionStore";
 import { isResponseCorrect } from "./isResponseCorrect";
@@ -39,6 +51,7 @@ export type TestPhase =
   | "presenting"
   | "awaiting_response"
   | "complete"
+  | "stopped"
   | "error";
 
 export type SessionFormat = "single" | "flanked-triplet";
@@ -54,6 +67,7 @@ export type CompletedTrial = {
   responseKind: "letter" | "not_sure";
   responseLetter: SloanLetter | null;
   correct: boolean;
+  voided: boolean;
 };
 
 export type TestSnapshot = {
@@ -74,6 +88,10 @@ export type TestSnapshot = {
   history: readonly CompletedTrial[];
   historyLoadFailed: boolean;
   errorMessage: string | null;
+  correction: RunContext["correction"] | null;
+  result: RunResult | null;
+  notSureCount: number;
+  errorDetail: string | null;
 };
 
 type ActiveTrial = {
@@ -85,10 +103,37 @@ type ActiveTrial = {
   choices: SloanLetter[];
   presentationId: string | null;
   recorded: boolean;
+  voided: boolean;
 };
 
+type RememberedTrial = {
+  trialIndex: number;
+  stepIndex: number;
+  target: SloanLetter;
+  leftFlanker: SloanLetter | null;
+  rightFlanker: SloanLetter | null;
+  presentationId: string | null;
+};
+
+type SetupProbe = () => {
+  validityOk: boolean;
+  zoomState: "default" | "not-default" | "unknown";
+  viewportWidthCssPx: number;
+  viewportHeightCssPx: number;
+};
+
+type RespondedState = Extract<LoopState, { phase: "responded" }>;
+
 const POLL_MS = 3000;
-const CLIENT_BUILD = "thin-loop-9-10";
+const CLIENT_BUILD = "m4-staircase-1";
+
+const MSG_CONNECTION = "The test lost its connection. Refresh the page to carry on.";
+const MSG_SETUP_CHANGED =
+  "Your screen settings changed during the test, so it has stopped. Please set up your screen again and start a new test.";
+const MSG_SCREEN_CANNOT_SHOW = "This screen can't show the test letters at this distance.";
+const MSG_SESSION_ENDED = "This test has ended. Start a new test to continue.";
+const MSG_SESSION_CANNOT_CONTINUE =
+  "This test cannot be continued. Start a new test to continue.";
 
 const SERVER_SNAPSHOT: TestSnapshot = {
   phase: "idle",
@@ -108,13 +153,19 @@ const SERVER_SNAPSHOT: TestSnapshot = {
   history: [],
   historyLoadFailed: false,
   errorMessage: null,
+  correction: null,
+  result: null,
+  notSureCount: 0,
+  errorDetail: null,
 };
 
 const listeners = new Set<() => void>();
 let cachedSnapshot: TestSnapshot = SERVER_SNAPSHOT;
 
 let calibration: Calibration | null = null;
-let stepIndices: number[] = [];
+let staircase: StaircaseState | null = null;
+let run: RunContext | null = null;
+let nextTrialIndex = 0;
 let activeTrial: ActiveTrial | null = null;
 let history: CompletedTrial[] = [];
 let channel: SessionChannel | null = null;
@@ -127,6 +178,15 @@ let measureInFlight = false;
 let advanceInFlight = false;
 let disposed = false;
 let resumeGeneration = 0;
+let setupProbe: SetupProbe | null = null;
+let setupStopped = false;
+let skippingDuplicateTrial = false;
+let visibilityGeneration = 0;
+let visibilityChain: Promise<void> = Promise.resolve();
+let stateChain: Promise<void> = Promise.resolve();
+const voidedLetters = new Map<number, RememberedTrial>();
+const voidEventSent = new Set<number>();
+const voidStateSaved = new Set<string>();
 
 const SESSION_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -144,22 +204,186 @@ function clearSessionIdFromUrl(): void {
   window.history.replaceState(window.history.state, "", window.location.pathname);
 }
 
-const MSG_SESSION_ENDED =
-  "This test has ended. Start a new test to continue.";
-const MSG_SESSION_CANNOT_CONTINUE =
-  "This test cannot be continued. Start a new test to continue.";
+function detailText(detail: unknown): string {
+  if (typeof detail === "string") {
+    return detail;
+  }
+  if (detail instanceof Error) {
+    return detail.message;
+  }
+  if (
+    detail !== null &&
+    typeof detail === "object" &&
+    "message" in detail &&
+    typeof detail.message === "string"
+  ) {
+    return detail.message;
+  }
+  return String(detail);
+}
+
+function resetRunMemory(): void {
+  staircase = null;
+  run = null;
+  nextTrialIndex = 0;
+  voidedLetters.clear();
+  voidEventSent.clear();
+  voidStateSaved.clear();
+  skippingDuplicateTrial = false;
+  visibilityGeneration += 1;
+  visibilityChain = Promise.resolve();
+}
+
+function currentNotSureCount(): number {
+  if (run === null) {
+    return 0;
+  }
+  return notSureCount(
+    history.map((row) => ({
+      trialIndex: row.trialIndex,
+      stepIndex: row.stepIndex,
+      target: row.target,
+      responseKind: row.responseKind,
+      responseLetter: row.responseLetter,
+    })),
+    run.voidedTrialIndices,
+  );
+}
+
+function scoredLetterCount(state: StaircaseState): number {
+  let count = 0;
+  for (const level of state.levels) {
+    count += level.scored;
+  }
+  return count;
+}
+
+/**
+ * vcp_record_presentation inserts into presentations. A second row for the
+ * same (session_id, trial_index) hits presentations_session_id_trial_index_key
+ * and Postgres raises 23505, which the app classifies as unique-violation.
+ */
+function isDuplicateTrialIndex(error: VcpError): boolean {
+  return error.kind === "unique-violation";
+}
+
+function enqueueState<T>(fn: () => Promise<T>): Promise<T> {
+  const result = stateChain.then(fn, fn);
+  stateChain = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+function writeState(
+  status: "created" | "running" | "complete" | "abandoned",
+  currentState: Json,
+): Promise<Awaited<ReturnType<typeof sessionStore.setState>>> {
+  return enqueueState(() => sessionStore.setState(status, currentState));
+}
+
+function rememberTrial(trial: ActiveTrial): void {
+  voidedLetters.set(trial.trialIndex, {
+    trialIndex: trial.trialIndex,
+    stepIndex: trial.stepIndex,
+    target: trial.target,
+    leftFlanker: trial.leftFlanker,
+    rightFlanker: trial.rightFlanker,
+    presentationId: trial.presentationId,
+  });
+}
+
+/**
+ * Records the void in the staircase and in run before any await.
+ * A phone answer read after this returns cannot be scored.
+ */
+function commitVoid(trial: ActiveTrial): boolean {
+  if (trial.voided) {
+    return true;
+  }
+  if (run === null || staircase === null || staircase.status !== "running") {
+    return false;
+  }
+  staircase = recordTrial(staircase, { letter: trial.target, outcome: "void" });
+  if (!run.voidedTrialIndices.includes(trial.trialIndex)) {
+    run = {
+      ...run,
+      voidedTrialIndices: [...run.voidedTrialIndices, trial.trialIndex],
+    };
+  }
+  trial.voided = true;
+  rememberTrial(trial);
+  return true;
+}
+
+function isVoidedPresentation(trialIndex: number, presentationId: string): boolean {
+  if (run !== null && run.voidedTrialIndices.includes(trialIndex)) {
+    return true;
+  }
+  if (
+    activeTrial !== null &&
+    activeTrial.voided &&
+    activeTrial.presentationId === presentationId
+  ) {
+    return true;
+  }
+  return voidedLetters.has(trialIndex);
+}
+
+function sourceForTrial(trialIndex: number): RememberedTrial | ActiveTrial | null {
+  const remembered = voidedLetters.get(trialIndex);
+  if (remembered !== undefined) {
+    return remembered;
+  }
+  if (activeTrial !== null && activeTrial.trialIndex === trialIndex) {
+    return activeTrial;
+  }
+  return null;
+}
+
+function appendVoidedHistory(state: RespondedState): void {
+  if (history.some((row) => row.trialIndex === state.trialIndex)) {
+    return;
+  }
+  const source = sourceForTrial(state.trialIndex);
+  if (source === null) {
+    return;
+  }
+  history = [
+    ...history,
+    {
+      trialIndex: state.trialIndex,
+      stepIndex: source.stepIndex,
+      target: source.target,
+      leftFlanker: source.leftFlanker,
+      rightFlanker: source.rightFlanker,
+      responseKind: state.responseKind,
+      responseLetter: state.responseLetter,
+      correct: isResponseCorrect(state.responseKind, state.responseLetter, source.target),
+      voided: true,
+    },
+  ];
+  patch({ history, notSureCount: currentNotSureCount() });
+}
 
 /**
  * Plain ended screen: start controls available, session cleared from the
  * address bar so a refresh does not reopen it. No further writes.
  */
-function showSessionEndedScreen(message: string): void {
+function showSessionEndedScreen(message: string, detail?: unknown): void {
+  if (setupStopped) {
+    return;
+  }
   stopPoll();
   leaveChannel();
   stopVisibilityTracking();
   activeTrial = null;
   clearSessionIdFromUrl();
   sessionStore.reset();
+  if (detail !== undefined) {
+    console.error(detail);
+  }
   patch({
     phase: "error",
     sessionId: null,
@@ -173,6 +397,10 @@ function showSessionEndedScreen(message: string): void {
     history: [],
     historyLoadFailed: false,
     errorMessage: message,
+    errorDetail: detail === undefined ? null : detailText(detail),
+    result: null,
+    notSureCount: 0,
+    correction: null,
   });
 }
 
@@ -188,43 +416,6 @@ function formatFromCurrentState(currentState: unknown): SessionFormat | null {
     return format;
   }
   return null;
-}
-
-/**
- * Highest trial index known from loop state. Ready / unknown → -1 so the
- * next trial is 0. Awaiting or responded → that index (already has a row).
- */
-function highestKnownTrialIndex(state: ReturnType<typeof parseLoopState>): number {
-  if (state === null) {
-    return -1;
-  }
-  if (state.phase === "awaiting_response" || state.phase === "responded") {
-    return state.trialIndex;
-  }
-  return -1;
-}
-
-function rebuildStepIndices(
-  distanceMm: number,
-  nextCalibration: Calibration,
-  format: SessionFormat,
-  viewportWidthCssPx: number,
-  viewportHeightCssPx: number,
-): number[] {
-  const pitchMm = pixelPitchMm(
-    nextCalibration.cssPxPerMm,
-    nextCalibration.devicePixelRatio,
-  );
-  if (format === "flanked-triplet") {
-    return renderableStepIndicesForTriplet(
-      distanceMm,
-      pitchMm,
-      nextCalibration.cssPxPerMm,
-      viewportWidthCssPx,
-      viewportHeightCssPx,
-    );
-  }
-  return renderableStepIndices(distanceMm, pitchMm);
 }
 
 async function buildRemotePairing(sessionId: string): Promise<{
@@ -251,9 +442,16 @@ function patch(partial: Partial<TestSnapshot>): void {
   });
 }
 
-function fail(message: string): void {
+function fail(message: string, detail?: unknown): void {
   stopVisibilityTracking();
-  patch({ phase: "error", errorMessage: message });
+  if (detail !== undefined) {
+    console.error(detail);
+  }
+  patch({
+    phase: "error",
+    errorMessage: message,
+    errorDetail: detail === undefined ? null : detailText(detail),
+  });
 }
 
 export function subscribe(listener: () => void): () => void {
@@ -271,6 +469,62 @@ export function getServerSnapshot(): TestSnapshot {
   return SERVER_SNAPSHOT;
 }
 
+export function setSetupProbe(probe: SetupProbe | null): void {
+  setupProbe = probe;
+}
+
+function currentStepForSetup(): number | null {
+  if (staircase === null || staircase.status !== "running") {
+    return null;
+  }
+  return staircase.currentStepIndex;
+}
+
+function evaluateSetup(
+  format: SessionFormat,
+  viewport?: {
+    viewportWidthCssPx: number;
+    viewportHeightCssPx: number;
+  },
+): "ok" | "calibration" | "zoom" | "window" | null {
+  if (setupProbe === null || calibration === null || cachedSnapshot.distanceMm === null) {
+    return null;
+  }
+  const probe = setupProbe();
+  let drawableStepIndices: number[] = [];
+  try {
+    drawableStepIndices = computeTestLevels({
+      distanceMm: cachedSnapshot.distanceMm,
+      pixelPitchMm: pixelPitchMm(calibration.cssPxPerMm, calibration.devicePixelRatio),
+      cssPxPerMm: calibration.cssPxPerMm,
+      viewportWidthCssPx: viewport?.viewportWidthCssPx ?? probe.viewportWidthCssPx,
+      viewportHeightCssPx: viewport?.viewportHeightCssPx ?? probe.viewportHeightCssPx,
+      format,
+    }).stepIndices;
+  } catch (error) {
+    console.error(error);
+    return "window";
+  }
+  return setupCheck({
+    validityOk: probe.validityOk,
+    zoomState: probe.zoomState,
+    drawableStepIndices,
+    currentStepIndex: currentStepForSetup(),
+  });
+}
+
+export function checkSetupNow(): void {
+  const phase = cachedSnapshot.phase;
+  if (phase !== "ready" && phase !== "presenting" && phase !== "awaiting_response") {
+    return;
+  }
+  const outcome = evaluateSetup(cachedSnapshot.format);
+  if (outcome === null || outcome === "ok") {
+    return;
+  }
+  void stopForSetup(outcome);
+}
+
 function stopPoll(): void {
   if (pollTimer !== null) {
     clearInterval(pollTimer);
@@ -284,6 +538,44 @@ function leaveChannel(): void {
     channel.leave();
     channel = null;
   }
+}
+
+async function stopForSetup(reason: "calibration" | "zoom" | "window"): Promise<void> {
+  if (setupStopped || disposed) {
+    return;
+  }
+  setupStopped = true;
+  visibilityGeneration += 1;
+  const currentRun = run;
+  if (currentRun !== null) {
+    const eventResult = await sessionStore.appendEvent({
+      type: "stopped_for_setup",
+      payload: { reason },
+    });
+    if (!eventResult.ok) {
+      console.error(eventResult.error);
+    }
+    const abandoned = await writeState("abandoned", readyState(currentRun));
+    if (!abandoned.ok) {
+      console.error(abandoned.error);
+    }
+  }
+  stopPoll();
+  leaveChannel();
+  stopVisibilityTracking();
+  activeTrial = null;
+  clearSessionIdFromUrl();
+  patch({
+    phase: "stopped",
+    sessionId: null,
+    errorMessage: MSG_SETUP_CHANGED,
+    errorDetail: null,
+    currentTrialIndex: null,
+    currentStepIndex: null,
+    currentTarget: null,
+    currentLeftFlanker: null,
+    currentRightFlanker: null,
+  });
 }
 
 function completedTrialFromAnswered(row: AnsweredTrial): CompletedTrial {
@@ -303,7 +595,19 @@ function completedTrialFromAnswered(row: AnsweredTrial): CompletedTrial {
     responseKind: row.responseKind,
     responseLetter: row.responseLetter,
     correct: isResponseCorrect(row.responseKind, row.responseLetter, target),
+    voided: false,
   };
+}
+
+function withVoidedFlags(
+  rows: CompletedTrial[],
+  voidedTrialIndices: readonly number[],
+): CompletedTrial[] {
+  const voided = new Set(voidedTrialIndices);
+  return rows.map((row) => ({
+    ...row,
+    voided: voided.has(row.trialIndex),
+  }));
 }
 
 /**
@@ -326,22 +630,220 @@ async function rebuildHistoryFromAnsweredTrials(sessionId: string): Promise<{
   };
 }
 
+async function persistHiddenVoid(trial: ActiveTrial): Promise<void> {
+  if (!voidEventSent.has(trial.trialIndex)) {
+    voidEventSent.add(trial.trialIndex);
+    const eventResult = await sessionStore.appendEvent({
+      type: "trial_voided",
+      payload: {
+        trial_index: trial.trialIndex,
+        presentation_id: trial.presentationId,
+        reason: "page_hidden",
+      },
+    });
+    if (!eventResult.ok) {
+      console.error(eventResult.error);
+    }
+  }
+  if (disposed || setupStopped) {
+    return;
+  }
+  const presentationId = trial.presentationId;
+  const currentRun = run;
+  if (presentationId === null || currentRun === null) {
+    return;
+  }
+  if (voidStateSaved.has(presentationId)) {
+    return;
+  }
+  voidStateSaved.add(presentationId);
+  const stateResult = await writeState(
+    "running",
+    awaitingResponseState({
+      trialIndex: trial.trialIndex,
+      presentationId,
+      choices: trial.choices,
+      run: currentRun,
+    }),
+  );
+  if (stateResult.ok) {
+    return;
+  }
+  voidStateSaved.delete(presentationId);
+  if (stateResult.error.kind === "version-conflict") {
+    await captureVoidedAnswerIfResponded();
+    const latestRun = run;
+    const latestPresentationId = trial.presentationId;
+    if (latestRun === null || latestPresentationId === null || disposed || setupStopped) {
+      fail(MSG_CONNECTION, stateResult.error);
+      return;
+    }
+    const retry = await writeState(
+      "running",
+      awaitingResponseState({
+        trialIndex: trial.trialIndex,
+        presentationId: latestPresentationId,
+        choices: trial.choices,
+        run: latestRun,
+      }),
+    );
+    if (!retry.ok) {
+      fail(MSG_CONNECTION, retry.error);
+      return;
+    }
+    voidStateSaved.add(latestPresentationId);
+    return;
+  }
+  fail(MSG_CONNECTION, stateResult.error);
+}
+
+async function restoreFreshTrialIfNeeded(): Promise<void> {
+  const fresh = activeTrial;
+  const currentRun = run;
+  if (
+    fresh === null ||
+    fresh.voided ||
+    fresh.presentationId === null ||
+    currentRun === null ||
+    disposed ||
+    setupStopped
+  ) {
+    return;
+  }
+  const rewritten = await writeState(
+    "running",
+    awaitingResponseState({
+      trialIndex: fresh.trialIndex,
+      presentationId: fresh.presentationId,
+      choices: fresh.choices,
+      run: currentRun,
+    }),
+  );
+  if (!rewritten.ok) {
+    fail(MSG_CONNECTION, rewritten.error);
+    return;
+  }
+  if (channel !== null) {
+    await channel.sendNudge("awaiting_response");
+  }
+}
+
+async function finishRun(): Promise<void> {
+  if (disposed || setupStopped) {
+    return;
+  }
+  const currentRun = run;
+  const currentStaircase = staircase;
+  if (currentRun === null || currentStaircase === null || currentStaircase.status !== "finished") {
+    fail(MSG_CONNECTION);
+    return;
+  }
+  const distanceMm = cachedSnapshot.distanceMm;
+  if (distanceMm === null) {
+    fail(MSG_SESSION_CANNOT_CONTINUE);
+    return;
+  }
+  const result = currentStaircase.result;
+  const done = await writeState(
+    "complete",
+    completeState(scoredLetterCount(currentStaircase), { run: currentRun, result }),
+  );
+  if (!done.ok) {
+    fail(MSG_CONNECTION, done.error);
+    return;
+  }
+  if (disposed || setupStopped) {
+    return;
+  }
+  if (channel !== null) {
+    await channel.sendNudge("complete");
+  }
+  try {
+    const qualityResult = await sessionStore.upsertTestQuality(
+      testQualityPayload({
+        result,
+        run: currentRun,
+        distanceMm,
+        notSureCount: currentNotSureCount(),
+      }),
+    );
+    if (!qualityResult.ok) {
+      console.error(qualityResult.error);
+      const logged = await sessionStore.appendEvent({
+        type: "test_quality_write_failed",
+        payload: { message: qualityResult.error.message },
+      });
+      if (!logged.ok) {
+        console.error(logged.error);
+      }
+    }
+  } catch (error) {
+    console.error(error);
+    const message = error instanceof Error ? error.message : String(error);
+    const logged = await sessionStore.appendEvent({
+      type: "test_quality_write_failed",
+      payload: { message },
+    });
+    if (!logged.ok) {
+      console.error(logged.error);
+    }
+  }
+  if (disposed || setupStopped) {
+    return;
+  }
+  activeTrial = null;
+  stopVisibilityTracking();
+  patch({
+    phase: "complete",
+    result,
+    correction: currentRun.correction,
+    notSureCount: currentNotSureCount(),
+    currentTrialIndex: null,
+    currentStepIndex: null,
+    currentTarget: null,
+    currentLeftFlanker: null,
+    currentRightFlanker: null,
+    history,
+    errorMessage: null,
+    errorDetail: null,
+  });
+}
+
+async function captureVoidedAnswerIfResponded(): Promise<void> {
+  const sessionId = cachedSnapshot.sessionId;
+  if (sessionId === null || disposed || setupStopped) {
+    return;
+  }
+  const loaded = await sessionStore.loadSession(sessionId);
+  if (!loaded.ok || disposed || setupStopped) {
+    return;
+  }
+  if (loaded.data.status === "abandoned") {
+    showSessionEndedScreen(MSG_SESSION_ENDED);
+    return;
+  }
+  const state = parseLoopState(loaded.data.currentState);
+  if (state === null || state.phase !== "responded") {
+    return;
+  }
+  if (!isVoidedPresentation(state.trialIndex, state.presentationId)) {
+    return;
+  }
+  appendVoidedHistory(state);
+}
+
 /**
  * Advance only after a vcp_get_session read shows phase 'responded'
- * for the current presentation id.
+ * for the current presentation id. A voided presentation is kept and not scored.
  */
 async function tryAdvanceFromResponded(): Promise<void> {
-  if (disposed || advanceInFlight) {
+  if (disposed || setupStopped || advanceInFlight) {
     return;
   }
-  if (cachedSnapshot.phase !== "awaiting_response") {
+  const phase = cachedSnapshot.phase;
+  if (phase !== "awaiting_response" && phase !== "presenting") {
     return;
   }
-  const trial = activeTrial;
-  if (trial === null || trial.presentationId === null) {
-    return;
-  }
-
   const sessionId = cachedSnapshot.sessionId;
   if (sessionId === null) {
     return;
@@ -350,17 +852,17 @@ async function tryAdvanceFromResponded(): Promise<void> {
   advanceInFlight = true;
   try {
     const loaded = await sessionStore.loadSession(sessionId);
-    if (!loaded.ok || disposed) {
+    if (!loaded.ok || disposed || setupStopped) {
       return;
     }
     if (loaded.data.status === "abandoned") {
       showSessionEndedScreen(MSG_SESSION_ENDED);
       return;
     }
-    if (cachedSnapshot.phase !== "awaiting_response") {
-      return;
-    }
-    if (activeTrial !== trial || trial.presentationId === null) {
+    if (
+      cachedSnapshot.phase !== "awaiting_response" &&
+      cachedSnapshot.phase !== "presenting"
+    ) {
       return;
     }
 
@@ -368,7 +870,33 @@ async function tryAdvanceFromResponded(): Promise<void> {
     if (state === null || state.phase !== "responded") {
       return;
     }
+
+    if (isVoidedPresentation(state.trialIndex, state.presentationId)) {
+      appendVoidedHistory(state);
+      const fresh = activeTrial;
+      if (
+        fresh !== null &&
+        !fresh.voided &&
+        fresh.presentationId !== null &&
+        fresh.presentationId !== state.presentationId
+      ) {
+        await restoreFreshTrialIfNeeded();
+      }
+      return;
+    }
+
+    if (cachedSnapshot.phase !== "awaiting_response") {
+      return;
+    }
+    const trial = activeTrial;
+    if (trial === null || trial.voided || trial.presentationId === null) {
+      return;
+    }
     if (state.presentationId !== trial.presentationId) {
+      return;
+    }
+    const currentStaircase = staircase;
+    if (currentStaircase === null || currentStaircase.status !== "running") {
       return;
     }
 
@@ -388,43 +916,29 @@ async function tryAdvanceFromResponded(): Promise<void> {
         responseKind: state.responseKind,
         responseLetter: state.responseLetter,
         correct,
+        voided: false,
       },
     ];
-    patch({ history });
-
-    const nextIndex = trial.trialIndex + 1;
+    staircase = recordTrial(currentStaircase, {
+      letter: trial.target,
+      outcome: correct ? "correct" : "incorrect",
+    });
     activeTrial = null;
     stopVisibilityTracking();
+    patch({ history, notSureCount: currentNotSureCount() });
 
-    if (nextIndex >= stepIndices.length) {
-      const done = await sessionStore.setState("complete", completeState(history.length));
-      if (!done.ok) {
-        fail(done.error.message);
-        return;
-      }
-      if (channel !== null) {
-        await channel.sendNudge("complete");
-      }
-      patch({
-        phase: "complete",
-        currentTrialIndex: null,
-        currentStepIndex: null,
-        currentTarget: null,
-        currentLeftFlanker: null,
-        currentRightFlanker: null,
-        history,
-      });
+    if (staircase.status === "finished") {
+      await finishRun();
       return;
     }
-
-    await presentTrialAt(nextIndex);
+    await presentNextLetter();
   } finally {
     advanceInFlight = false;
   }
 }
 
 async function onSessionNudgeOrPoll(): Promise<void> {
-  if (disposed) {
+  if (disposed || setupStopped) {
     return;
   }
   const sessionId = cachedSnapshot.sessionId;
@@ -433,7 +947,7 @@ async function onSessionNudgeOrPoll(): Promise<void> {
   }
 
   const loaded = await sessionStore.loadSession(sessionId);
-  if (!loaded.ok || disposed) {
+  if (!loaded.ok || disposed || setupStopped) {
     return;
   }
 
@@ -447,7 +961,7 @@ async function onSessionNudgeOrPoll(): Promise<void> {
     (uiPhase === "waiting_for_phone" || uiPhase === "creating") &&
     loaded.data.status === "paired"
   ) {
-    patch({ phase: "ready", errorMessage: null });
+    patch({ phase: "ready", errorMessage: null, errorDetail: null });
   }
 
   await tryAdvanceFromResponded();
@@ -455,7 +969,7 @@ async function onSessionNudgeOrPoll(): Promise<void> {
 
 /** Channel + poll. Called from TestClient useEffect when sessionId appears. */
 export function watchSession(sessionId: string): void {
-  if (disposed) {
+  if (disposed || setupStopped) {
     return;
   }
   if (channel === null) {
@@ -465,7 +979,7 @@ export function watchSession(sessionId: string): void {
   }
   if (pollTimer === null) {
     pollTimer = setInterval(() => {
-      if (pollInFlight || disposed) {
+      if (pollInFlight || disposed || setupStopped) {
         return;
       }
       pollInFlight = true;
@@ -476,17 +990,95 @@ export function watchSession(sessionId: string): void {
   }
 }
 
-async function presentTrialAt(trialIndex: number): Promise<void> {
-  if (disposed) {
+function queueVisibility(state: "hidden" | "visible"): void {
+  const generation = visibilityGeneration;
+  visibilityChain = visibilityChain
+    .then(async () => {
+      if (generation !== visibilityGeneration || disposed || setupStopped) {
+        return;
+      }
+      if (state === "hidden") {
+        await interruptActiveLetter();
+        return;
+      }
+      await presentFreshAfterVoid();
+    })
+    .catch((error: unknown) => {
+      console.error(error);
+    });
+}
+
+async function interruptActiveLetter(): Promise<void> {
+  if (disposed || setupStopped) {
     return;
   }
-  const stepIndex = stepIndices[trialIndex];
-  if (stepIndex === undefined || calibration === null) {
-    fail("No trial steps available for this distance and screen.");
+  const phase = cachedSnapshot.phase;
+  if (phase !== "presenting" && phase !== "awaiting_response") {
+    return;
+  }
+  const trial = activeTrial;
+  if (trial === null || trial.voided) {
+    return;
+  }
+  if (!commitVoid(trial)) {
+    fail(MSG_CONNECTION);
+    return;
+  }
+  await persistHiddenVoid(trial);
+}
+
+async function presentFreshAfterVoid(): Promise<void> {
+  if (disposed || setupStopped) {
+    return;
+  }
+  const trial = activeTrial;
+  if (trial === null || !trial.voided) {
+    return;
+  }
+  const phase = cachedSnapshot.phase;
+  if (phase !== "presenting" && phase !== "awaiting_response") {
+    return;
+  }
+  await captureVoidedAnswerIfResponded();
+  if (disposed || setupStopped || cachedSnapshot.phase === "error") {
+    return;
+  }
+  const outcome = evaluateSetup(cachedSnapshot.format);
+  if (outcome === null) {
+    console.error("setup probe is not registered");
+    return;
+  }
+  if (outcome !== "ok") {
+    await stopForSetup(outcome);
+    return;
+  }
+  if (disposed || setupStopped) {
+    return;
+  }
+  if (staircase !== null && staircase.status === "finished") {
+    await finishRun();
+    return;
+  }
+  await presentNextLetter();
+}
+
+async function presentNextLetter(): Promise<void> {
+  if (disposed || setupStopped) {
+    return;
+  }
+  const current = staircase;
+  const currentRun = run;
+  if (
+    current === null ||
+    current.status !== "running" ||
+    currentRun === null ||
+    calibration === null
+  ) {
+    fail(MSG_SCREEN_CANNOT_SHOW);
     return;
   }
 
-  const target = pickTarget(Math.random);
+  const target = pickNextTarget(current, Math.random);
   const choices = buildTrialChoices(target, Math.random);
   let leftFlanker: SloanLetter | null = null;
   let rightFlanker: SloanLetter | null = null;
@@ -495,6 +1087,9 @@ async function presentTrialAt(trialIndex: number): Promise<void> {
     leftFlanker = flankers[0];
     rightFlanker = flankers[1];
   }
+  const trialIndex = nextTrialIndex;
+  nextTrialIndex += 1;
+  const stepIndex = current.currentStepIndex;
   activeTrial = {
     trialIndex,
     stepIndex,
@@ -504,18 +1099,21 @@ async function presentTrialAt(trialIndex: number): Promise<void> {
     choices,
     presentationId: null,
     recorded: false,
+    voided: false,
   };
 
-  startVisibilityTracking(trialIndex);
+  startVisibilityTracking(trialIndex, queueVisibility);
 
   patch({
     phase: "presenting",
+    correction: currentRun.correction,
     currentTrialIndex: trialIndex,
     currentStepIndex: stepIndex,
     currentTarget: target,
     currentLeftFlanker: leftFlanker,
     currentRightFlanker: rightFlanker,
     errorMessage: null,
+    errorDetail: null,
   });
 }
 
@@ -528,14 +1126,14 @@ export function handleCanvasMeasured(measurement: OptotypeMeasurement): void {
 }
 
 async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void> {
-  if (disposed || measureInFlight) {
+  if (disposed || setupStopped || measureInFlight) {
     return;
   }
   if (cachedSnapshot.phase !== "presenting") {
     return;
   }
   const trial = activeTrial;
-  if (trial === null || trial.recorded) {
+  if (trial === null || trial.recorded || trial.voided) {
     return;
   }
   if (calibration === null || cachedSnapshot.distanceMm === null) {
@@ -550,9 +1148,11 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
   try {
     if (
       disposed ||
+      setupStopped ||
       cachedSnapshot.phase !== "presenting" ||
       activeTrial !== trial ||
-      trial.recorded
+      trial.recorded ||
+      trial.voided
     ) {
       return;
     }
@@ -609,19 +1209,52 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
     const recorded = await sessionStore.recordPresentation(payload);
     if (!recorded.ok) {
       trial.recorded = false;
-      fail(recorded.error.message);
+      if (isDuplicateTrialIndex(recorded.error) && !skippingDuplicateTrial) {
+        skippingDuplicateTrial = true;
+        if (!commitVoid(trial)) {
+          skippingDuplicateTrial = false;
+          fail(MSG_CONNECTION, recorded.error);
+          return;
+        }
+        if (nextTrialIndex <= trial.trialIndex) {
+          nextTrialIndex = trial.trialIndex + 1;
+        }
+        if (staircase !== null && staircase.status === "finished") {
+          await finishRun();
+          return;
+        }
+        await presentNextLetter();
+        return;
+      }
+      skippingDuplicateTrial = false;
+      fail(MSG_CONNECTION, recorded.error);
       return;
     }
+    skippingDuplicateTrial = false;
 
-    if (
-      disposed ||
-      activeTrial !== trial ||
-      cachedSnapshot.phase !== "presenting"
-    ) {
+    if (disposed || setupStopped) {
       return;
     }
 
     trial.presentationId = recorded.data;
+    if (trial.voided) {
+      rememberTrial(trial);
+      const fresh = activeTrial;
+      const freshAlreadySaved =
+        fresh !== null &&
+        fresh !== trial &&
+        !fresh.voided &&
+        fresh.presentationId !== null;
+      if (!freshAlreadySaved) {
+        await persistHiddenVoid(trial);
+      }
+      return;
+    }
+
+    if (activeTrial !== trial || cachedSnapshot.phase !== "presenting") {
+      return;
+    }
+
     setVisibilityPresentationId(recorded.data);
 
     const eventResult = await sessionStore.appendEvent({
@@ -632,20 +1265,26 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
       },
     });
     if (!eventResult.ok) {
-      fail(eventResult.error.message);
+      fail(MSG_CONNECTION, eventResult.error);
       return;
     }
 
-    const stateResult = await sessionStore.setState(
+    const currentRun = run;
+    if (currentRun === null) {
+      fail(MSG_CONNECTION);
+      return;
+    }
+    const stateResult = await writeState(
       "running",
       awaitingResponseState({
         trialIndex: trial.trialIndex,
         presentationId: recorded.data,
         choices: trial.choices,
+        run: currentRun,
       }),
     );
     if (!stateResult.ok) {
-      fail(stateResult.error.message);
+      fail(MSG_CONNECTION, stateResult.error);
       return;
     }
 
@@ -665,6 +1304,7 @@ export async function start(
   format: SessionFormat,
   viewportWidthCssPx: number,
   viewportHeightCssPx: number,
+  correction: RunContext["correction"],
 ): Promise<void> {
   if (startInFlight) {
     return;
@@ -675,60 +1315,118 @@ export async function start(
 
   startInFlight = true;
   disposed = false;
+  setupStopped = false;
   leaveChannel();
   stopPoll();
   stopVisibilityTracking();
   activeTrial = null;
   history = [];
   calibration = nextCalibration;
-  stepIndices = rebuildStepIndices(
-    distanceMm,
-    nextCalibration,
-    format,
-    viewportWidthCssPx,
-    viewportHeightCssPx,
-  );
-
-  patch({
-    phase: "creating",
-    format,
-    formatSource: "chosen",
-    distanceMm,
-    sessionId: null,
-    remoteUrl: null,
-    qrDataUrl: null,
-    currentTrialIndex: null,
-    currentStepIndex: null,
-    currentTarget: null,
-    currentLeftFlanker: null,
-    currentRightFlanker: null,
-    cssPxPerMm: nextCalibration.cssPxPerMm,
-    devicePixelRatio: nextCalibration.devicePixelRatio,
-    history: [],
-    historyLoadFailed: false,
-    errorMessage: null,
-  });
+  resetRunMemory();
 
   try {
+    let levels: ReturnType<typeof computeTestLevels>;
+    try {
+      levels = computeTestLevels({
+        distanceMm,
+        pixelPitchMm: pixelPitchMm(
+          nextCalibration.cssPxPerMm,
+          nextCalibration.devicePixelRatio,
+        ),
+        cssPxPerMm: nextCalibration.cssPxPerMm,
+        viewportWidthCssPx,
+        viewportHeightCssPx,
+        format,
+      });
+    } catch (error) {
+      fail(MSG_SCREEN_CANNOT_SHOW, error);
+      return;
+    }
+    if (levels.stepIndices.length === 0) {
+      fail(MSG_SCREEN_CANNOT_SHOW);
+      return;
+    }
+
+    const nextRun: RunContext = {
+      correction,
+      stepIndices: levels.stepIndices,
+      finestLimitedBy: levels.finestLimitedBy,
+      coarsestLimitedBy: levels.coarsestLimitedBy,
+      voidedTrialIndices: [],
+    };
+    let started: ReturnType<typeof startStaircase>;
+    try {
+      started = startStaircase(nextRun.stepIndices);
+    } catch (error) {
+      fail(MSG_SCREEN_CANNOT_SHOW, error);
+      return;
+    }
+    if (started.status !== "running") {
+      fail(MSG_SCREEN_CANNOT_SHOW);
+      return;
+    }
+    run = nextRun;
+    staircase = started;
+    nextTrialIndex = 0;
+
+    patch({
+      phase: "creating",
+      format,
+      formatSource: "chosen",
+      correction,
+      distanceMm,
+      sessionId: null,
+      remoteUrl: null,
+      qrDataUrl: null,
+      currentTrialIndex: null,
+      currentStepIndex: null,
+      currentTarget: null,
+      currentLeftFlanker: null,
+      currentRightFlanker: null,
+      cssPxPerMm: nextCalibration.cssPxPerMm,
+      devicePixelRatio: nextCalibration.devicePixelRatio,
+      history: [],
+      historyLoadFailed: false,
+      errorMessage: null,
+      errorDetail: null,
+      result: null,
+      notSureCount: 0,
+    });
+
     sessionStore.reset();
     const created = await sessionStore.createSession({
       distanceMmRequested: distanceMm,
       clientBuild: CLIENT_BUILD,
     });
     if (!created.ok) {
-      fail(created.error.message);
+      fail(MSG_CONNECTION, created.error);
       return;
     }
 
     const attached = await sessionStore.attachCalibration(nextCalibration);
     if (!attached.ok) {
-      fail(attached.error.message);
+      fail(MSG_CONNECTION, attached.error);
       return;
     }
 
-    const ready = await sessionStore.setState("created", readyState());
+    const ready = await writeState("created", readyState(nextRun));
     if (!ready.ok) {
-      fail(ready.error.message);
+      fail(MSG_CONNECTION, ready.error);
+      return;
+    }
+
+    const startedEvent = await sessionStore.appendEvent({
+      type: "test_started",
+      payload: {
+        correction,
+        step_indices: [...nextRun.stepIndices],
+        finest_limited_by: nextRun.finestLimitedBy,
+        coarsest_limited_by: nextRun.coarsestLimitedBy,
+        client_build: CLIENT_BUILD,
+      },
+    });
+    if (!startedEvent.ok) {
+      fail(MSG_CONNECTION, startedEvent.error);
       return;
     }
 
@@ -745,6 +1443,26 @@ export async function start(
   } finally {
     startInFlight = false;
   }
+}
+
+function adoptPausedRun(nextRun: RunContext): boolean {
+  let started: ReturnType<typeof startStaircase>;
+  try {
+    started = startStaircase(nextRun.stepIndices);
+  } catch (error) {
+    console.error(error);
+    return false;
+  }
+  if (started.status !== "running") {
+    return false;
+  }
+  run = {
+    ...nextRun,
+    voidedTrialIndices: [...nextRun.voidedTrialIndices],
+  };
+  staircase = started;
+  nextTrialIndex = 0;
+  return true;
 }
 
 /**
@@ -769,6 +1487,7 @@ export async function resume(
 
   resumeInFlight = true;
   disposed = false;
+  setupStopped = false;
   const generation = resumeGeneration;
   leaveChannel();
   stopPoll();
@@ -776,6 +1495,7 @@ export async function resume(
   activeTrial = null;
   history = [];
   calibration = nextCalibration;
+  resetRunMemory();
 
   patch({
     phase: "resuming",
@@ -792,13 +1512,17 @@ export async function resume(
     history: [],
     historyLoadFailed: false,
     errorMessage: null,
+    errorDetail: null,
+    result: null,
+    notSureCount: 0,
+    correction: null,
   });
 
   try {
     sessionStore.reset();
     const loaded = await sessionStore.loadSession(sessionId);
     if (!loaded.ok) {
-      fail(loaded.error.message);
+      fail(MSG_CONNECTION, loaded.error);
       return;
     }
     if (disposed || generation !== resumeGeneration) {
@@ -824,22 +1548,14 @@ export async function resume(
 
     const distanceMm = view.distanceMmRequested;
     if (distanceMm === null) {
-      fail("This session has no viewing distance stored.");
+      fail(MSG_SESSION_CANNOT_CONTINUE);
       return;
     }
 
     const stateFormat = formatFromCurrentState(view.currentState);
     const format: SessionFormat = stateFormat ?? "flanked-triplet";
-    const formatSource: FormatSource =
-      stateFormat !== null ? "state" : "resumed-default";
-
-    stepIndices = rebuildStepIndices(
-      distanceMm,
-      nextCalibration,
-      format,
-      viewportWidthCssPx,
-      viewportHeightCssPx,
-    );
+    const formatSource: FormatSource = stateFormat !== null ? "state" : "resumed-default";
+    const loopState = parseLoopState(view.currentState);
 
     setSessionIdInUrl(view.id);
     const pairing = await buildRemotePairing(view.id);
@@ -847,35 +1563,44 @@ export async function resume(
       return;
     }
 
-    if (view.status === "created") {
+    if (view.status === "created" || view.status === "paired") {
+      if (loopState === null || loopState.run === null) {
+        showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE);
+        return;
+      }
+      if (!adoptPausedRun(loopState.run)) {
+        showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE);
+        return;
+      }
       patch({
-        phase: "waiting_for_phone",
+        phase: view.status === "created" ? "waiting_for_phone" : "ready",
         format,
         formatSource,
+        correction: loopState.run.correction,
         distanceMm,
         sessionId: view.id,
         remoteUrl: pairing.remoteUrl,
         qrDataUrl: pairing.qrDataUrl,
         errorMessage: null,
-      });
-      return;
-    }
-
-    if (view.status === "paired") {
-      patch({
-        phase: "ready",
-        format,
-        formatSource,
-        distanceMm,
-        sessionId: view.id,
-        remoteUrl: pairing.remoteUrl,
-        qrDataUrl: pairing.qrDataUrl,
-        errorMessage: null,
+        errorDetail: null,
       });
       return;
     }
 
     if (view.status === "complete") {
+      if (
+        loopState === null ||
+        loopState.phase !== "complete" ||
+        loopState.run === null ||
+        loopState.result === null
+      ) {
+        showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE);
+        return;
+      }
+      run = {
+        ...loopState.run,
+        voidedTrialIndices: [...loopState.run.voidedTrialIndices],
+      };
       const rebuilt = await rebuildHistoryFromAnsweredTrials(view.id);
       if (disposed || generation !== resumeGeneration) {
         return;
@@ -883,11 +1608,14 @@ export async function resume(
       if (rebuilt.error !== null) {
         console.error(rebuilt.error);
       }
-      history = rebuilt.history;
+      history = withVoidedFlags(rebuilt.history, run.voidedTrialIndices);
       patch({
         phase: "complete",
         format,
         formatSource,
+        correction: run.correction,
+        result: loopState.result,
+        notSureCount: currentNotSureCount(),
         distanceMm,
         sessionId: view.id,
         remoteUrl: pairing.remoteUrl,
@@ -895,86 +1623,151 @@ export async function resume(
         history,
         historyLoadFailed: rebuilt.historyLoadFailed,
         errorMessage: null,
+        errorDetail: rebuilt.error === null ? null : detailText(rebuilt.error),
       });
       return;
     }
 
     // view.status === "running"
+    if (loopState === null || loopState.run === null) {
+      showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE);
+      return;
+    }
+    const savedRun = loopState.run;
     const rebuilt = await rebuildHistoryFromAnsweredTrials(view.id);
     if (disposed || generation !== resumeGeneration) {
       return;
     }
     if (rebuilt.error !== null) {
-      console.error(rebuilt.error);
+      showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE, rebuilt.error);
+      return;
     }
-    history = rebuilt.history;
 
-    const loopState = parseLoopState(view.currentState);
-    const nextTrialIndex = highestKnownTrialIndex(loopState) + 1;
+    const highestPresentedTrialIndex =
+      loopState.phase === "awaiting_response" || loopState.phase === "responded"
+        ? loopState.trialIndex
+        : null;
+    const replay = replayRun({
+      stepIndices: savedRun.stepIndices,
+      answered: rebuilt.history.map((row) => ({
+        trialIndex: row.trialIndex,
+        stepIndex: row.stepIndex,
+        target: row.target,
+        responseKind: row.responseKind,
+        responseLetter: row.responseLetter,
+      })),
+      voidedTrialIndices: savedRun.voidedTrialIndices,
+      highestPresentedTrialIndex,
+    });
+    if (replay.status === "inconsistent") {
+      showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE, replay.reason);
+      return;
+    }
+
+    const previousVoided = new Set(savedRun.voidedTrialIndices);
+    run = {
+      ...savedRun,
+      voidedTrialIndices: [...replay.voidedTrialIndices],
+    };
+    staircase = replay.staircase;
+    nextTrialIndex = replay.nextTrialIndex;
+    history = withVoidedFlags(rebuilt.history, run.voidedTrialIndices);
+
+    const newlyVoided = replay.voidedTrialIndices.filter(
+      (trialIndex) => !previousVoided.has(trialIndex),
+    );
+    for (const trialIndex of newlyVoided) {
+      const appended = await sessionStore.appendEvent({
+        type: "trial_voided",
+        payload: {
+          trial_index: trialIndex,
+          presentation_id: null,
+          reason: "reload",
+        },
+      });
+      if (!appended.ok) {
+        console.error(appended.error);
+      }
+      if (disposed || generation !== resumeGeneration || setupStopped) {
+        return;
+      }
+    }
 
     patch({
       format,
       formatSource,
+      correction: run.correction,
       distanceMm,
       sessionId: view.id,
       remoteUrl: pairing.remoteUrl,
       qrDataUrl: pairing.qrDataUrl,
       history,
-      historyLoadFailed: rebuilt.historyLoadFailed,
+      historyLoadFailed: false,
+      notSureCount: currentNotSureCount(),
       errorMessage: null,
+      errorDetail: null,
     });
 
-    const ready = await sessionStore.setState("running", readyState());
-    if (!ready.ok) {
-      fail(ready.error.message);
+    const setup = evaluateSetup("flanked-triplet", {
+      viewportWidthCssPx,
+      viewportHeightCssPx,
+    });
+    if (setup === null) {
+      console.error("setup probe is not registered");
+      showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE);
+      return;
+    }
+    if (setup !== "ok") {
+      await stopForSetup(setup);
       return;
     }
     if (disposed || generation !== resumeGeneration) {
+      return;
+    }
+
+    if (staircase.status === "finished") {
+      await finishRun();
+      return;
+    }
+
+    const currentRun = run;
+    if (currentRun === null) {
+      showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE);
+      return;
+    }
+    const ready = await writeState("running", readyState(currentRun));
+    if (!ready.ok) {
+      fail(MSG_CONNECTION, ready.error);
+      return;
+    }
+    if (disposed || generation !== resumeGeneration || setupStopped) {
       return;
     }
     if (channel !== null) {
       await channel.sendNudge("running");
     }
 
-    if (nextTrialIndex >= stepIndices.length) {
-      const done = await sessionStore.setState(
-        "complete",
-        completeState(history.length),
-      );
-      if (!done.ok) {
-        fail(done.error.message);
-        return;
-      }
-      if (channel !== null) {
-        await channel.sendNudge("complete");
-      }
-      patch({
-        phase: "complete",
-        currentTrialIndex: null,
-        currentStepIndex: null,
-        currentTarget: null,
-        currentLeftFlanker: null,
-        currentRightFlanker: null,
-        history,
-      });
-      return;
-    }
-
-    await presentTrialAt(nextTrialIndex);
+    await presentNextLetter();
   } finally {
     resumeInFlight = false;
   }
 }
 
 export async function beginTrials(): Promise<void> {
-  if (beginInFlight) {
+  if (beginInFlight || setupStopped) {
     return;
   }
   if (cachedSnapshot.phase !== "ready") {
     return;
   }
-  if (stepIndices.length === 0) {
-    fail("No renderable steps for this distance and screen.");
+  const currentRun = run;
+  if (
+    currentRun === null ||
+    currentRun.stepIndices.length === 0 ||
+    staircase === null ||
+    staircase.status !== "running"
+  ) {
+    fail(MSG_SCREEN_CANNOT_SHOW);
     return;
   }
 
@@ -986,16 +1779,16 @@ export async function beginTrials(): Promise<void> {
       return;
     }
     if (session.status === "paired") {
-      const running = await sessionStore.setState("running", readyState());
+      const running = await writeState("running", readyState(currentRun));
       if (!running.ok) {
-        fail(running.error.message);
+        fail(MSG_CONNECTION, running.error);
         return;
       }
       if (channel !== null) {
         await channel.sendNudge("running");
       }
     }
-    await presentTrialAt(0);
+    await presentNextLetter();
   } finally {
     beginInFlight = false;
   }
@@ -1003,6 +1796,7 @@ export async function beginTrials(): Promise<void> {
 
 export function dispose(): void {
   disposed = true;
+  setupStopped = false;
   resumeGeneration += 1;
   stopPoll();
   leaveChannel();
@@ -1015,7 +1809,7 @@ export function dispose(): void {
   activeTrial = null;
   history = [];
   calibration = null;
-  stepIndices = [];
+  resetRunMemory();
   sessionStore.reset();
   emit({ ...SERVER_SNAPSHOT });
 }

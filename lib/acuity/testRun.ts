@@ -194,3 +194,28 @@ export function testQualityPayload(input: {
 
   return payload;
 }
+
+/**
+ * Whether the screen is still fit to show the current letter.
+ * Order is fixed: calibration, then zoom, then window. "unknown" zoom passes.
+ */
+export function setupCheck(input: {
+  validityOk: boolean;
+  zoomState: "default" | "not-default" | "unknown";
+  drawableStepIndices: readonly number[];
+  currentStepIndex: number | null;
+}): "ok" | "calibration" | "zoom" | "window" {
+  if (!input.validityOk) {
+    return "calibration";
+  }
+  if (input.zoomState === "not-default") {
+    return "zoom";
+  }
+  if (
+    input.currentStepIndex !== null &&
+    !input.drawableStepIndices.includes(input.currentStepIndex)
+  ) {
+    return "window";
+  }
+  return "ok";
+}

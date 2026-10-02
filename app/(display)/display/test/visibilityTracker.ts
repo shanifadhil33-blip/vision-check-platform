@@ -21,6 +21,7 @@ let trialStartedAtMs = 0;
 let buffer: BufferedChange[] = [];
 let sendChain: Promise<void> = Promise.resolve();
 let onVisibilityChange: (() => void) | null = null;
+let notifyVisibility: ((state: VisibilityState) => void) | null = null;
 
 function readState(): VisibilityState {
   return document.visibilityState === "visible" ? "visible" : "hidden";
@@ -60,19 +61,24 @@ function handleVisibilityChange(): void {
   };
   if (presentationId === null) {
     buffer.push(record);
-    return;
+  } else {
+    enqueueSend(presentationId, trialIndex, record);
   }
-  enqueueSend(presentationId, trialIndex, record);
+  notifyVisibility?.(record.state);
 }
 
 /** Stop any active listener, then start for this trial. */
-export function startVisibilityTracking(nextTrialIndex: number): void {
+export function startVisibilityTracking(
+  nextTrialIndex: number,
+  onChange?: (state: VisibilityState) => void,
+): void {
   stopVisibilityTracking();
   trialIndex = nextTrialIndex;
   presentationId = null;
   buffer = [];
   trialStartedAtMs = Date.now();
   listening = true;
+  notifyVisibility = onChange ?? null;
   onVisibilityChange = handleVisibilityChange;
   document.addEventListener("visibilitychange", onVisibilityChange);
 }
@@ -103,4 +109,5 @@ export function stopVisibilityTracking(): void {
   buffer = [];
   presentationId = null;
   trialIndex = null;
+  notifyVisibility = null;
 }

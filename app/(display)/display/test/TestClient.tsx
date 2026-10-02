@@ -5,15 +5,18 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { OptotypeCanvas } from "@/app/(display)/display/optotype/OptotypeCanvas";
 import { useCalibration } from "@/app/(display)/display/calibrate/useCalibration";
+import { zoomSignal, type ZoomSignalState } from "@/lib/calibration";
 import { TripletCanvas } from "./TripletCanvas";
 import {
   beginTrials,
+  checkSetupNow,
   dispose,
   getServerSnapshot,
   getSnapshot,
   handleCanvasMeasured,
   resume,
   type SessionFormat,
+  setSetupProbe,
   start,
   subscribe,
   watchSession,
@@ -22,16 +25,78 @@ import {
 const SESSION_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+const diagListeners = new Set<() => void>();
+let diagEnabled = false;
+
+function subscribeDiag(listener: () => void): () => void {
+  diagListeners.add(listener);
+  return () => {
+    diagListeners.delete(listener);
+  };
+}
+
+function diagSnapshot(): boolean {
+  return diagEnabled;
+}
+
+function diagServerSnapshot(): boolean {
+  return false;
+}
+
 export default function TestClient() {
   const { ready, calibration, validity } = useCalibration();
   const snap = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
   const [distanceMm, setDistanceMm] = useState<3000 | 2000>(3000);
   const [format, setFormat] = useState<SessionFormat>("flanked-triplet");
+  const showDiag = useSyncExternalStore(subscribeDiag, diagSnapshot, diagServerSnapshot);
   const resumeStarted = useRef(false);
+  const validityOkRef = useRef(false);
+  const zoomStateRef = useRef<ZoomSignalState>("unknown");
+  const viewportWidthCssPxRef = useRef(0);
+  const viewportHeightCssPxRef = useRef(0);
 
   useEffect(() => {
     return () => {
       dispose();
+    };
+  }, []);
+
+  useEffect(() => {
+    function syncProbeWindow(): void {
+      validityOkRef.current = validity?.ok ?? false;
+      zoomStateRef.current = zoomSignal(window.outerWidth, window.innerWidth).state;
+      viewportWidthCssPxRef.current = window.innerWidth;
+      viewportHeightCssPxRef.current = window.innerHeight;
+    }
+
+    syncProbeWindow();
+    setSetupProbe(() => ({
+      validityOk: validityOkRef.current,
+      zoomState: zoomStateRef.current,
+      viewportWidthCssPx: viewportWidthCssPxRef.current,
+      viewportHeightCssPx: viewportHeightCssPxRef.current,
+    }));
+    checkSetupNow();
+
+    function onResize(): void {
+      syncProbeWindow();
+      checkSetupNow();
+    }
+
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      setSetupProbe(null);
+    };
+  }, [validity?.ok]);
+
+  useEffect(() => {
+    diagEnabled = new URLSearchParams(window.location.search).get("diag") === "1";
+    for (const listener of diagListeners) {
+      listener();
+    }
+    return () => {
+      diagEnabled = false;
     };
   }, []);
 
@@ -63,6 +128,23 @@ export default function TestClient() {
     return (
       <main className="flex flex-1 items-center justify-center px-6 text-neutral-400">
         Checking calibration…
+      </main>
+    );
+  }
+
+  if (snap.phase === "stopped") {
+    return (
+      <main className="mx-auto flex w-full max-w-xl flex-1 flex-col items-center justify-center gap-4 px-6 py-10 text-center">
+        <p className="text-neutral-300">{snap.errorMessage}</p>
+        {showDiag && snap.errorDetail !== null && (
+          <p className="text-xs text-neutral-500">{snap.errorDetail}</p>
+        )}
+        <Link
+          href="/display/calibrate"
+          className="text-sky-400 underline underline-offset-4 hover:text-sky-300"
+        >
+          Set up your screen
+        </Link>
       </main>
     );
   }
@@ -188,6 +270,8 @@ export default function TestClient() {
                 format,
                 window.innerWidth,
                 window.innerHeight,
+                // Build B2 replaces this with the wearing question.
+                "none",
               );
             }}
             className="rounded bg-sky-600 px-4 py-3 text-base font-medium text-white hover:bg-sky-500"
@@ -195,7 +279,12 @@ export default function TestClient() {
             Start
           </button>
           {snap.phase === "error" && snap.errorMessage !== null && (
-            <p className="text-sm text-red-400">{snap.errorMessage}</p>
+            <>
+              <p className="text-sm text-red-400">{snap.errorMessage}</p>
+              {showDiag && snap.errorDetail !== null && (
+                <p className="text-xs text-neutral-500">{snap.errorDetail}</p>
+              )}
+            </>
           )}
         </section>
       )}
@@ -285,7 +374,12 @@ export default function TestClient() {
       )}
 
       {snap.phase === "error" && snap.errorMessage !== null && snap.sessionId !== null && (
-        <p className="text-sm text-red-400">{snap.errorMessage}</p>
+        <>
+          <p className="text-sm text-red-400">{snap.errorMessage}</p>
+          {showDiag && snap.errorDetail !== null && (
+            <p className="text-xs text-neutral-500">{snap.errorDetail}</p>
+          )}
+        </>
       )}
     </main>
   );

@@ -8,7 +8,7 @@ import {
   type TrialOutcome,
 } from "./staircase";
 
-const FULL = [-3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+const FULL = [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
 const passLevel: readonly TrialOutcome[] = [
   "correct",
@@ -24,6 +24,14 @@ const failLevel: readonly TrialOutcome[] = [
   "incorrect",
   "incorrect",
   "incorrect",
+];
+
+const allCorrect: readonly TrialOutcome[] = [
+  "correct",
+  "correct",
+  "correct",
+  "correct",
+  "correct",
 ];
 
 function runLevel(state: StaircaseState, outcomes: readonly TrialOutcome[]): StaircaseState {
@@ -70,7 +78,7 @@ describe("startStaircase", () => {
   it("ST2 starts at 3 when it is present, otherwise at the nearest included end", () => {
     expect(runningOn([2, 3, 4, 5, 6, 7, 8, 9, 10]).currentStepIndex).toBe(3);
     expect(runningOn([5, 6, 7, 8, 9, 10]).currentStepIndex).toBe(5);
-    expect(runningOn([-3, -2, -1, 0, 1]).currentStepIndex).toBe(1);
+    expect(runningOn([-1, 0, 1]).currentStepIndex).toBe(1);
     expect(startStaircase([])).toEqual({ status: "cannot-start" });
   });
 
@@ -140,25 +148,26 @@ describe("recordTrial", () => {
     expect(state.levels.reduce((total, level) => total + level.letters.length, 0)).toBe(20);
   });
 
-  it("ST8 reports the test floor when every level from 0.3 down to -0.3 passes", () => {
+  it("ST8 reports the test floor when every letter from 0.3 down to -0.1 is correct", () => {
     let state: StaircaseState = runningOn(FULL);
-    for (let stepIndex = 3; stepIndex >= -3; stepIndex -= 1) {
+    for (let stepIndex = 3; stepIndex >= -1; stepIndex -= 1) {
       if (state.status !== "running") {
         throw new Error("expected a running staircase");
       }
       expect(state.currentStepIndex).toBe(stepIndex);
-      state = runLevel(state, passLevel);
+      state = runLevel(state, allCorrect);
     }
 
     expect(state).toMatchObject({
       status: "finished",
-      result: { kind: "test-floor", stepIndex: -3 },
+      result: { kind: "test-floor", stepIndex: -1 },
     });
     if (state.status !== "finished") {
       throw new Error("expected a finished staircase");
     }
-    expect(state.levels).toHaveLength(7);
-    expect(state.levels.reduce((total, level) => total + level.letters.length, 0)).toBe(35);
+    expect(state.levels.map((level) => level.stepIndex)).toEqual([3, 2, 1, 0, -1]);
+    expect(state.levels).toHaveLength(5);
+    expect(state.levels.reduce((total, level) => total + level.letters.length, 0)).toBe(25);
   });
 
   it("ST9 measures 0.5 when the start and the next coarser level fail and 0.5 passes", () => {
@@ -213,13 +222,22 @@ describe("recordTrial", () => {
     });
   });
 
-  it("ST12 is screen-limited when the only start level passes, and measured when the next coarser level passes", () => {
-    const passedStart = runLevel(runningOn([5, 6, 7, 8, 9, 10]), passLevel);
+  it("ST12 is screen-limited at 5 when five letters at the only start level are correct", () => {
+    const started = runningOn([5, 6, 7, 8, 9, 10]);
+    expect(started.currentStepIndex).toBe(5);
+    const passedStart = runLevel(started, allCorrect);
     expect(passedStart).toMatchObject({
       status: "finished",
       result: { kind: "screen-limited", stepIndex: 5 },
     });
+    if (passedStart.status !== "finished") {
+      throw new Error("expected a finished staircase");
+    }
+    expect(passedStart.levels).toHaveLength(1);
+    expect(passedStart.levels.reduce((total, level) => total + level.letters.length, 0)).toBe(5);
+  });
 
+  it("ST20 measures 6 when 2 of 5 at 5 fail and 3 of 5 at 6 pass", () => {
     let failedStart: StaircaseState = runningOn([5, 6, 7, 8, 9, 10]);
     failedStart = runLevel(failedStart, failLevel);
     if (failedStart.status !== "running") {
@@ -230,10 +248,16 @@ describe("recordTrial", () => {
       status: "finished",
       result: { kind: "measured", stepIndex: 6 },
     });
+    if (failedStart.status !== "finished") {
+      throw new Error("expected a finished staircase");
+    }
+    expect(failedStart.result).toEqual({ kind: "measured", stepIndex: 6 });
+    expect(failedStart.levels).toHaveLength(2);
+    expect(failedStart.levels.reduce((total, level) => total + level.letters.length, 0)).toBe(10);
   });
 
   it("ST13 is not measurable at 0.8 when that is the coarsest level offered and it fails", () => {
-    let state: StaircaseState = runningOn([-3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    let state: StaircaseState = runningOn([-1, 0, 1, 2, 3, 4, 5, 6, 7, 8]);
     for (let stepIndex = 3; stepIndex <= 8; stepIndex += 1) {
       if (state.status !== "running") {
         throw new Error("expected a running staircase");
@@ -244,6 +268,67 @@ describe("recordTrial", () => {
     expect(state).toMatchObject({
       status: "finished",
       result: { kind: "not-measurable", coarsestStepIndex: 8 },
+    });
+  });
+
+  it("ST18 is not measurable when every level from 5 through 10 fails", () => {
+    let state: StaircaseState = runningOn([5, 6, 7, 8, 9, 10]);
+    for (let stepIndex = 5; stepIndex <= 10; stepIndex += 1) {
+      if (state.status !== "running") {
+        throw new Error("expected a running staircase");
+      }
+      expect(state.currentStepIndex).toBe(stepIndex);
+      state = runLevel(state, failLevel);
+    }
+
+    expect(state).toMatchObject({
+      status: "finished",
+      result: { kind: "not-measurable", coarsestStepIndex: 10 },
+    });
+    if (state.status !== "finished") {
+      throw new Error("expected a finished staircase");
+    }
+    expect(state.levels).toHaveLength(6);
+    expect(state.levels.reduce((total, level) => total + level.letters.length, 0)).toBe(30);
+  });
+
+  it("ST19 is screen-limited at 1 when 3, 2 and 1 pass, and measured at 2 when 1 fails", () => {
+    const range = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    let passed: StaircaseState = runningOn(range);
+    for (const stepIndex of [3, 2, 1]) {
+      if (passed.status !== "running") {
+        throw new Error("expected a running staircase");
+      }
+      expect(passed.currentStepIndex).toBe(stepIndex);
+      passed = runLevel(passed, passLevel);
+    }
+
+    expect(passed).toMatchObject({
+      status: "finished",
+      result: { kind: "screen-limited", stepIndex: 1 },
+    });
+    if (passed.status !== "finished") {
+      throw new Error("expected a finished staircase");
+    }
+    expect(passed.levels.map((level) => level.stepIndex)).toEqual([3, 2, 1]);
+    expect(passed.levels.reduce((total, level) => total + level.letters.length, 0)).toBe(15);
+
+    let failed: StaircaseState = runningOn(range);
+    for (const stepIndex of [3, 2]) {
+      if (failed.status !== "running") {
+        throw new Error("expected a running staircase");
+      }
+      expect(failed.currentStepIndex).toBe(stepIndex);
+      failed = runLevel(failed, passLevel);
+    }
+    if (failed.status !== "running") {
+      throw new Error("expected a running staircase");
+    }
+    expect(failed.currentStepIndex).toBe(1);
+    failed = runLevel(failed, failLevel);
+    expect(failed).toMatchObject({
+      status: "finished",
+      result: { kind: "measured", stepIndex: 2 },
     });
   });
 

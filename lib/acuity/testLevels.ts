@@ -6,8 +6,8 @@
 import { letterHeightMmForLogMar } from "./logmar";
 import { canRenderLogMar, CROWDING_WIDTH_LETTER_MULTIPLE } from "./renderableRange";
 
-/** Finest step the test is allowed to use: logMAR −0.3. */
-export const FINEST_TESTED_STEP_INDEX = -3;
+/** Finest step the test is allowed to use: logMAR −0.1 (6/5). */
+export const FINEST_TESTED_STEP_INDEX = -1;
 
 /** Coarsest step the test is allowed to use: logMAR 1.0. */
 export const COARSEST_TESTED_STEP_INDEX = 10;
@@ -15,7 +15,7 @@ export const COARSEST_TESTED_STEP_INDEX = 10;
 /** Clear space kept inside each viewport edge, in CSS pixels. */
 export const VIEWPORT_MARGIN_CSS_PX = 64;
 
-/** Extra CSS pixels below the letter for the response arrow. */
+/** Extra CSS pixels above the canvas for the response arrow. */
 export const ARROW_ALLOWANCE_CSS_PX = 48;
 
 export type TestFormat = "flanked-triplet" | "single";

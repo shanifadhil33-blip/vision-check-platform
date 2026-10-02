@@ -8,10 +8,10 @@ const LAPTOP = {
   viewportHeightCssPx: 585,
 };
 
-const FULL = [-3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+const FULL = [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
 describe("computeTestLevels", () => {
-  it("TL1 keeps every level from -3 to 10 on a laptop at 2000 mm in triplet format", () => {
+  it("TL1 keeps all 12 levels from -1 to 10 on a laptop at 2000 mm in triplet format", () => {
     expect(
       computeTestLevels({
         ...LAPTOP,
@@ -25,7 +25,7 @@ describe("computeTestLevels", () => {
     });
   });
 
-  it("TL2 keeps every level from -3 to 10 on a laptop at 3000 mm in triplet format", () => {
+  it("TL2 keeps all 12 levels from -1 to 10 on a laptop at 3000 mm in triplet format", () => {
     expect(
       computeTestLevels({
         ...LAPTOP,
@@ -62,7 +62,7 @@ describe("computeTestLevels", () => {
         format: "flanked-triplet",
       }),
     ).toEqual({
-      stepIndices: [-3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8],
+      stepIndices: [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8],
       finestLimitedBy: "requested-bound",
       coarsestLimitedBy: "viewport-size",
     });
@@ -123,8 +123,12 @@ describe("computeTestLevels", () => {
         viewportWidthCssPx: 1280,
         viewportHeightCssPx: 585,
         format: "flanked-triplet",
-      }).stepIndices,
-    ).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      }),
+    ).toEqual({
+      stepIndices: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+      finestLimitedBy: "screen-resolution",
+      coarsestLimitedBy: "requested-bound",
+    });
   });
 
   it("TL9 throws RangeError for a non-positive or non-finite measurement", () => {
@@ -139,5 +143,22 @@ describe("computeTestLevels", () => {
     expect(() =>
       computeTestLevels({ ...valid, viewportWidthCssPx: Number.POSITIVE_INFINITY }),
     ).toThrow(RangeError);
+  });
+
+  it("TL10 keeps steps 5 to 10 when the pitch can draw logMAR 0.5 but not 0.4", () => {
+    expect(
+      computeTestLevels({
+        distanceMm: 2000,
+        pixelPitchMm: 1,
+        cssPxPerMm: 2,
+        viewportWidthCssPx: 1280,
+        viewportHeightCssPx: 585,
+        format: "flanked-triplet",
+      }),
+    ).toEqual({
+      stepIndices: [5, 6, 7, 8, 9, 10],
+      finestLimitedBy: "screen-resolution",
+      coarsestLimitedBy: "requested-bound",
+    });
   });
 });

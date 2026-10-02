@@ -60,3 +60,10 @@ export type {
   StaircaseState,
   TrialOutcome,
 } from "./staircase";
+
+export { CUSTOMER_LABELS, customerLabelForStep } from "./resultLabel";
+
+export { isResponseCorrect } from "./isResponseCorrect";
+
+export { notSureCount, replayRun, testQualityPayload } from "./testRun";
+export type { ReplayRunResult, ReplayTrial, TestQualityPayload } from "./testRun";

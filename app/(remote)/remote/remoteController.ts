@@ -400,6 +400,7 @@ async function writeRespondedOnce(
         responseId,
         responseKind: kind,
         responseLetter: letter,
+        run: state.run,
       }),
     );
     if (written.ok) {

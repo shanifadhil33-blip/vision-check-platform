@@ -221,3 +221,20 @@ export async function appendEvent(args: {
     "vcp_append_event returned an unexpected shape",
   );
 }
+
+export async function upsertTestQuality(args: {
+  sessionId: string;
+  eye: "both";
+  quality: Json;
+}): Promise<RpcResult<string>> {
+  return callRpc(
+    () =>
+      getSupabaseBrowserClient().rpc("vcp_upsert_test_quality", {
+        p_session_id: args.sessionId,
+        p_eye: args.eye,
+        p_quality: args.quality,
+      }),
+    parseUuid,
+    "vcp_upsert_test_quality returned an unexpected shape",
+  );
+}

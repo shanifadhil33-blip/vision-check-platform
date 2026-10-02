@@ -15,6 +15,7 @@ import {
   recordPresentation as rpcRecordPresentation,
   setSessionState as rpcSetSessionState,
   submitResponse as rpcSubmitResponse,
+  upsertTestQuality as rpcUpsertTestQuality,
   type RpcResult,
 } from "@/lib/db/rpc";
 import type {
@@ -303,6 +304,28 @@ export async function appendEvent(args: {
     sessionId,
     type: args.type,
     payload: args.payload,
+  });
+  if (!result.ok) {
+    setLastError(result.error);
+    return result;
+  }
+
+  patch({ lastError: null });
+  return result;
+}
+
+export async function upsertTestQuality(quality: Json): Promise<RpcResult<string>> {
+  const sessionId = cachedSnapshot.sessionId;
+  if (sessionId === null) {
+    const error = noSessionError();
+    setLastError(error);
+    return { ok: false, error };
+  }
+
+  const result = await rpcUpsertTestQuality({
+    sessionId,
+    eye: "both",
+    quality,
   });
   if (!result.ok) {
     setLastError(result.error);

@@ -63,6 +63,15 @@ export type {
 
 export { CUSTOMER_LABELS, customerLabelForStep } from "./resultLabel";
 
+export {
+  CORRECTION_OPTIONS,
+  CORRECTION_PHRASE,
+  DISTANCE_ONLY_NOTICE,
+  SAFETY_NOTICE,
+  WEARING_QUESTION,
+  resultSentence,
+} from "./resultWording";
+
 export { isResponseCorrect } from "./isResponseCorrect";
 
 export { notSureCount, replayRun, setupCheck, testQualityPayload } from "./testRun";

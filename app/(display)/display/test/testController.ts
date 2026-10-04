@@ -21,7 +21,7 @@ import {
 } from "@/lib/acuity/testRun";
 import type { VcpError } from "@/lib/db/errors";
 import type { AnsweredTrial, PresentationPayload } from "@/lib/db/payloads";
-import { getAnsweredTrials } from "@/lib/db/rpc";
+import { getAnsweredTrials, setSessionState as rpcSetSessionState } from "@/lib/db/rpc";
 import type { Json } from "@/lib/db/types";
 import type { OptotypeMeasurement } from "@/app/(display)/display/optotype/OptotypeCanvas";
 import { joinSessionChannel, type SessionChannel } from "@/lib/session/channel";
@@ -132,7 +132,7 @@ const MSG_SETUP_CHANGED =
   "Your screen settings changed during the test, so it has stopped. Please set up your screen again and start a new test.";
 const MSG_SCREEN_CANNOT_SHOW = "This screen can't show the test letters at this distance.";
 const MSG_SESSION_ENDED = "This test has ended. Start a new test to continue.";
-const MSG_SESSION_CANNOT_CONTINUE =
+export const MSG_SESSION_CANNOT_CONTINUE =
   "This test cannot be continued. Start a new test to continue.";
 
 const SERVER_SNAPSHOT: TestSnapshot = {
@@ -187,6 +187,17 @@ let stateChain: Promise<void> = Promise.resolve();
 const voidedLetters = new Map<number, RememberedTrial>();
 const voidEventSent = new Set<number>();
 const voidStateSaved = new Set<string>();
+
+type RememberedFinishedTest = {
+  sessionId: string;
+  version: number;
+  run: RunContext;
+  result: RunResult;
+  scoredLetterCount: number;
+};
+
+let rememberedFinishedTest: RememberedFinishedTest | null = null;
+let finishedScoredLetterCount: number | null = null;
 
 const SESSION_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -744,9 +755,11 @@ async function finishRun(): Promise<void> {
     return;
   }
   const result = currentStaircase.result;
+  const letterCount = scoredLetterCount(currentStaircase);
+  finishedScoredLetterCount = letterCount;
   const done = await writeState(
     "complete",
-    completeState(scoredLetterCount(currentStaircase), { run: currentRun, result }),
+    completeState(letterCount, { run: currentRun, result }),
   );
   if (!done.ok) {
     fail(MSG_CONNECTION, done.error);
@@ -1298,6 +1311,91 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
   }
 }
 
+function copyRun(source: RunContext): RunContext {
+  return {
+    correction: source.correction,
+    stepIndices: [...source.stepIndices],
+    finestLimitedBy: source.finestLimitedBy,
+    coarsestLimitedBy: source.coarsestLimitedBy,
+    voidedTrialIndices: [...source.voidedTrialIndices],
+  };
+}
+
+function copyResult(source: RunResult): RunResult {
+  if (source.kind === "not-measurable") {
+    return { kind: "not-measurable", coarsestStepIndex: source.coarsestStepIndex };
+  }
+  return { kind: source.kind, stepIndex: source.stepIndex };
+}
+
+/**
+ * Leaves the finished test on screen and remembers it so the next start()
+ * can point that session at the new one. Each test is its own session.
+ */
+export function prepareTestAgain(): void {
+  const sessionId = cachedSnapshot.sessionId;
+  const result = cachedSnapshot.result;
+  const version = sessionStore.getSnapshot().version;
+  if (
+    sessionId !== null &&
+    version !== null &&
+    run !== null &&
+    result !== null &&
+    finishedScoredLetterCount !== null
+  ) {
+    rememberedFinishedTest = {
+      sessionId,
+      version,
+      run: copyRun(run),
+      result: copyResult(result),
+      scoredLetterCount: finishedScoredLetterCount,
+    };
+  } else {
+    rememberedFinishedTest = null;
+  }
+  stopPoll();
+  leaveChannel();
+  clearSessionIdFromUrl();
+  patch({
+    phase: "idle",
+    result: null,
+    sessionId: null,
+    remoteUrl: null,
+    qrDataUrl: null,
+  });
+}
+
+async function handOverFinishedTest(nextSessionId: string): Promise<void> {
+  const prior = rememberedFinishedTest;
+  if (prior === null) {
+    return;
+  }
+  try {
+    const handover = await rpcSetSessionState({
+      sessionId: prior.sessionId,
+      expectedVersion: prior.version,
+      status: "complete",
+      currentState: completeState(prior.scoredLetterCount, {
+        run: prior.run,
+        result: prior.result,
+        nextSessionId,
+      }),
+    });
+    if (!handover.ok) {
+      console.error(handover.error);
+      const logged = await sessionStore.appendEvent({
+        type: "handover_failed",
+        payload: { message: handover.error.message },
+      });
+      if (!logged.ok) {
+        console.error(logged.error);
+      }
+    }
+  } finally {
+    rememberedFinishedTest = null;
+  }
+}
+
 export async function start(
   distanceMm: number,
   nextCalibration: Calibration,
@@ -1415,15 +1513,19 @@ export async function start(
       return;
     }
 
+    const startedPayload: { [key: string]: Json } = {
+      correction,
+      step_indices: [...nextRun.stepIndices],
+      finest_limited_by: nextRun.finestLimitedBy,
+      coarsest_limited_by: nextRun.coarsestLimitedBy,
+      client_build: CLIENT_BUILD,
+    };
+    if (rememberedFinishedTest !== null) {
+      startedPayload.repeat_of = rememberedFinishedTest.sessionId;
+    }
     const startedEvent = await sessionStore.appendEvent({
       type: "test_started",
-      payload: {
-        correction,
-        step_indices: [...nextRun.stepIndices],
-        finest_limited_by: nextRun.finestLimitedBy,
-        coarsest_limited_by: nextRun.coarsestLimitedBy,
-        client_build: CLIENT_BUILD,
-      },
+      payload: startedPayload,
     });
     if (!startedEvent.ok) {
       fail(MSG_CONNECTION, startedEvent.error);
@@ -1431,6 +1533,7 @@ export async function start(
     }
 
     const sessionId = created.data.id;
+    await handOverFinishedTest(sessionId);
     setSessionIdInUrl(sessionId);
     const pairing = await buildRemotePairing(sessionId);
 
@@ -1597,6 +1700,7 @@ export async function resume(
         showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE);
         return;
       }
+      finishedScoredLetterCount = loopState.trialsCompleted;
       run = {
         ...loopState.run,
         voidedTrialIndices: [...loopState.run.voidedTrialIndices],
@@ -1810,6 +1914,8 @@ export function dispose(): void {
   history = [];
   calibration = null;
   resetRunMemory();
+  rememberedFinishedTest = null;
+  finishedScoredLetterCount = null;
   sessionStore.reset();
   emit({ ...SERVER_SNAPSHOT });
 }

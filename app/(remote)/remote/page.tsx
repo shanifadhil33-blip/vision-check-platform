@@ -10,12 +10,13 @@ function isUuid(value: string): boolean {
 export default async function RemotePage({
   searchParams,
 }: {
-  searchParams: Promise<{ session?: string | string[] }>;
+  searchParams: Promise<{ session?: string | string[]; follow?: string | string[] }>;
 }) {
   const params = await searchParams;
   const raw = params.session;
   const candidate = typeof raw === "string" ? raw : null;
   const sessionId = candidate !== null && isUuid(candidate) ? candidate : null;
+  const follow = params.follow === "1";
 
-  return <RemoteClient sessionId={sessionId} />;
+  return <RemoteClient sessionId={sessionId} follow={follow} />;
 }

@@ -17,6 +17,7 @@ import {
 
 type Props = {
   sessionId: string | null;
+  follow?: boolean;
 };
 
 function choiceButtonClass(
@@ -44,7 +45,7 @@ function choiceButtonClass(
   return `${base} bg-neutral-100 text-neutral-900 hover:bg-neutral-200 active:bg-neutral-300`;
 }
 
-export default function RemoteClient({ sessionId }: Props) {
+export default function RemoteClient({ sessionId, follow = false }: Props) {
   const snap = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
   const session = useSessionStore();
 
@@ -58,8 +59,8 @@ export default function RemoteClient({ sessionId }: Props) {
     if (sessionId === null) {
       return;
     }
-    void bootstrap(sessionId);
-  }, [sessionId]);
+    void bootstrap(sessionId, follow);
+  }, [sessionId, follow]);
 
   useEffect(() => {
     if (snap.sessionId !== null && snap.phase !== "not_found" && snap.phase !== "loading") {
@@ -125,7 +126,7 @@ export default function RemoteClient({ sessionId }: Props) {
   if (snap.phase === "complete") {
     return (
       <main className="flex flex-1 items-center justify-center px-6 text-center">
-        <p className="text-lg text-emerald-400">Test complete. You can put the phone down.</p>
+        <p className="text-lg text-emerald-400">{"Test complete. Your result is on the main screen. Keep this page open if you'd like to test again."}</p>
       </main>
     );
   }

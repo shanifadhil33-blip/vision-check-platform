@@ -80,6 +80,39 @@ describe("parseLoopState", () => {
       trialsCompleted: 4,
       run: null,
       result: { kind: "measured", stepIndex: 2 },
+      nextSessionId: null,
+    });
+  });
+
+  it("P7 round-trips a complete state with a valid UUID nextSessionId", () => {
+    const nextSessionId = "11111111-1111-4111-8111-111111111111";
+    const json = completeState(3, {
+      run: RUN,
+      result: { kind: "measured", stepIndex: 0 },
+      nextSessionId,
+    });
+    expect(parseLoopState(json)).toEqual({
+      phase: "complete",
+      trialsCompleted: 3,
+      run: RUN,
+      result: { kind: "measured", stepIndex: 0 },
+      nextSessionId,
+    });
+  });
+
+  it("P8 parses a non-UUID nextSessionId as null", () => {
+    expect(
+      parseLoopState({
+        phase: "complete",
+        trialsCompleted: 1,
+        nextSessionId: "abc",
+      }),
+    ).toEqual({
+      phase: "complete",
+      trialsCompleted: 1,
+      run: null,
+      result: null,
+      nextSessionId: null,
     });
   });
 

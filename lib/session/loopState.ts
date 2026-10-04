@@ -38,9 +38,13 @@ export type LoopState =
       trialsCompleted: number;
       run: RunContext | null;
       result: RunResult | null;
+      nextSessionId: string | null;
     };
 
 const SLOAN_SET: ReadonlySet<string> = new Set(SLOAN_LETTERS);
+
+const SESSION_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const CORRECTIONS: ReadonlySet<string> = new Set(["none", "contacts", "glasses"]);
 
@@ -162,6 +166,13 @@ export function parseRunResult(value: unknown): RunResult | null {
   return null;
 }
 
+function nextSessionIdFrom(value: unknown): string | null {
+  if (typeof value === "string" && SESSION_UUID_RE.test(value)) {
+    return value;
+  }
+  return null;
+}
+
 function parseChoices(value: unknown): SloanLetter[] | null {
   if (!Array.isArray(value) || value.length !== 5) {
     return null;
@@ -194,6 +205,7 @@ export function parseLoopState(value: unknown): LoopState | null {
       trialsCompleted: value.trialsCompleted,
       run,
       result: parseRunResult(value.result),
+      nextSessionId: nextSessionIdFrom(value.nextSessionId),
     };
   }
   if (phase === "awaiting_response") {
@@ -337,6 +349,7 @@ export function completeState(
   options?: {
     run?: RunContext | null;
     result?: RunResult | null;
+    nextSessionId?: string | null;
   },
 ): Json {
   const body: { [key: string]: Json } = {
@@ -347,6 +360,10 @@ export function completeState(
   const result = options?.result;
   if (result !== null && result !== undefined) {
     body.result = resultJson(result);
+  }
+  const nextSessionId = options?.nextSessionId;
+  if (typeof nextSessionId === "string") {
+    body.nextSessionId = nextSessionId;
   }
   return withOptionalRun;
 }

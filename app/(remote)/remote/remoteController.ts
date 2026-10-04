@@ -88,6 +88,7 @@ let answerInFlight = false;
 let disposed = false;
 let choicesShownAtMs: number | null = null;
 let lastHandledPresentationId: string | null = null;
+let followedNextSession = false;
 
 function emit(next: RemoteSnapshot): void {
   cachedSnapshot = next;
@@ -152,6 +153,14 @@ function showSessionEnded(): void {
   });
 }
 
+function followNextSession(nextSessionId: string): void {
+  if (followedNextSession) {
+    return;
+  }
+  followedNextSession = true;
+  window.location.replace(`/remote?session=${nextSessionId}&follow=1`);
+}
+
 function applyLoopState(state: LoopState | null, status: string | null): void {
   if (status === "abandoned") {
     showSessionEnded();
@@ -159,6 +168,9 @@ function applyLoopState(state: LoopState | null, status: string | null): void {
   }
 
   if (status === "complete" || (state !== null && state.phase === "complete")) {
+    if (state !== null && state.phase === "complete" && state.nextSessionId !== null) {
+      followNextSession(state.nextSessionId);
+    }
     patch({
       phase: "complete",
       choices: [],
@@ -279,7 +291,7 @@ export function watchRemote(sessionId: string): void {
   }
 }
 
-export async function bootstrap(sessionId: string): Promise<void> {
+export async function bootstrap(sessionId: string, follow = false): Promise<void> {
   disposed = false;
   patch({
     phase: "loading",
@@ -310,6 +322,9 @@ export async function bootstrap(sessionId: string): Promise<void> {
 
   if (loaded.data.status === "created") {
     patch({ phase: "connect", errorMessage: null });
+    if (follow) {
+      await connect();
+    }
     return;
   }
 
@@ -563,6 +578,7 @@ export function disposeRemote(): void {
   answerInFlight = false;
   choicesShownAtMs = null;
   lastHandledPresentationId = null;
+  followedNextSession = false;
   sessionStore.reset();
   emit({ ...SERVER_SNAPSHOT });
 }

@@ -93,6 +93,18 @@ export default function TestClient() {
   }, []);
 
   useEffect(() => {
+    if (snap.phase !== "idle" && snap.phase !== "error") {
+      return;
+    }
+    if (snap.distanceMm !== 2000 && snap.distanceMm !== 3000) {
+      return;
+    }
+    // The selector stays local after this, so a later choice is not overwritten.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- copy the finished test distance only when phase or distance changes
+    setDistanceMm(snap.distanceMm);
+  }, [snap.phase, snap.distanceMm]);
+
+  useEffect(() => {
     function syncProbeWindow(): void {
       validityOkRef.current = validity?.ok ?? false;
       zoomStateRef.current = zoomSignal(window.outerWidth, window.innerWidth).state;

@@ -182,11 +182,12 @@ export default function RemoteClient({ sessionId, follow = false }: Props) {
       <p className="text-center text-sm text-neutral-400">
         Which letter do you see?
       </p>
-      {sending && (
-        <p className="text-center text-sm text-neutral-200">
-          Sending your answer…
-        </p>
-      )}
+      <p
+        className="text-center text-sm text-neutral-200 min-h-5"
+        aria-live="polite"
+      >
+        {sending ? "Sending your answer…" : ""}
+      </p>
       <div className="grid grid-cols-1 gap-3">
         {snap.choices.map((letter: SloanLetter) => {
           const isSelected =

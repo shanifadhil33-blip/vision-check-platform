@@ -82,6 +82,7 @@ let cachedSnapshot: RemoteSnapshot = SERVER_SNAPSHOT;
 
 let channel: SessionChannel | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+let catchUpRegistered = false;
 let pollInFlight = false;
 let connectInFlight = false;
 let answerInFlight = false;
@@ -124,12 +125,43 @@ export function getServerSnapshot(): RemoteSnapshot {
   return SERVER_SNAPSHOT;
 }
 
+function refreshWhenVisible(): void {
+  if (document.visibilityState === "visible") {
+    void refreshFromServer();
+  }
+}
+
+function refreshOnReturn(): void {
+  void refreshFromServer();
+}
+
+function registerCatchUp(): void {
+  if (catchUpRegistered) {
+    return;
+  }
+  catchUpRegistered = true;
+  document.addEventListener("visibilitychange", refreshWhenVisible);
+  window.addEventListener("online", refreshOnReturn);
+  window.addEventListener("pageshow", refreshOnReturn);
+}
+
+function removeCatchUp(): void {
+  if (!catchUpRegistered) {
+    return;
+  }
+  document.removeEventListener("visibilitychange", refreshWhenVisible);
+  window.removeEventListener("online", refreshOnReturn);
+  window.removeEventListener("pageshow", refreshOnReturn);
+  catchUpRegistered = false;
+}
+
 function stopPoll(): void {
   if (pollTimer !== null) {
     clearInterval(pollTimer);
     pollTimer = null;
   }
   pollInFlight = false;
+  removeCatchUp();
 }
 
 function leaveChannel(): void {
@@ -289,6 +321,7 @@ export function watchRemote(sessionId: string): void {
       void pollOnce();
     }, POLL_MS);
   }
+  registerCatchUp();
 }
 
 export async function bootstrap(sessionId: string, follow = false): Promise<void> {

@@ -42,6 +42,7 @@ export type {
   RulerBarMeasurement,
   ValidityResult,
 } from "./types";
+export { calibrationForTestRecord } from "./forTestRecord";
 export { isCalibrationStillValid } from "./validity";
 export {
   ZOOM_SIGNAL_DEFAULT_TOLERANCE,

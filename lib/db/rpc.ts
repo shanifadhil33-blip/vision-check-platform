@@ -1,4 +1,4 @@
-import type { Calibration } from "@/lib/calibration";
+import { calibrationForTestRecord, type Calibration } from "@/lib/calibration";
 import { getSupabaseBrowserClient } from "./client";
 import {
   classifyPostgrestFailure,
@@ -136,7 +136,10 @@ export async function attachCalibration(args: {
     () =>
       getSupabaseBrowserClient().rpc("vcp_attach_calibration", {
         p_session_id: args.sessionId,
-        p_calibration: args.calibration,
+        p_calibration: calibrationForTestRecord(
+          args.calibration,
+          new Date().toISOString(),
+        ),
       }),
     parseUuid,
     "vcp_attach_calibration returned an unexpected shape",

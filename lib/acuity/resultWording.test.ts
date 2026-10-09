@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resultSentence } from "./resultWording";
+import { PRIVACY_NOTICE, resultSentence } from "./resultWording";
 
 describe("resultSentence", () => {
   it("W1 states 6/6 with contact lenses in the client's words", () => {
@@ -44,5 +44,16 @@ describe("resultSentence", () => {
     expect(resultSentence({ kind: "measured", stepIndex: 10 }, "glasses")).toContain(
       "is approximately 6/60.",
     );
+  });
+});
+
+describe("PRIVACY_NOTICE", () => {
+  it("matches the approved privacy wording exactly", () => {
+    expect(PRIVACY_NOTICE).toBe(
+      "No account or contact details are required. We keep technical test records for up to 12 months to help validate and improve the check. Our hosting providers also keep short-lived request logs, which include IP addresses.",
+    );
+    expect(
+      [...PRIVACY_NOTICE].every((character) => (character.codePointAt(0) ?? 0) <= 127),
+    ).toBe(true);
   });
 });

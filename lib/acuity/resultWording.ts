@@ -26,6 +26,9 @@ export const DISTANCE_ONLY_NOTICE =
 export const SAFETY_NOTICE =
   "If your vision has suddenly worsened, or you have severe eye pain, seek urgent medical attention rather than relying on this test.";
 
+export const PRIVACY_NOTICE =
+  "No account or contact details are required. We keep technical test records for up to 12 months to help validate and improve the check. Our hosting providers also keep short-lived request logs, which include IP addresses.";
+
 export function resultSentence(
   result: RunResult,
   correction: RunContext["correction"],

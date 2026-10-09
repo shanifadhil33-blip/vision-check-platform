@@ -13,6 +13,7 @@ import {
   WEARING_QUESTION,
   resultSentence,
 } from "@/lib/acuity";
+import { PRIVACY_NOTICE } from "@/lib/acuity/resultWording";
 import type { RunContext, RunResult } from "@/lib/session/loopState";
 import { TripletCanvas } from "./TripletCanvas";
 import {
@@ -289,6 +290,7 @@ export default function TestClient() {
             })}
           </div>
           <p className="text-base leading-relaxed text-neutral-300">{SAFETY_NOTICE}</p>
+          <p className="text-base leading-relaxed text-neutral-300">{PRIVACY_NOTICE}</p>
           <label className="flex flex-col gap-1 text-sm text-neutral-300">
             Viewing distance
             <select

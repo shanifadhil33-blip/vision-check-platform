@@ -9,6 +9,7 @@ import {
   type CardMatchAttempt,
   type DeviceContext,
 } from "@/lib/calibration";
+import { CAL_EXTRA_MATCH_NOTE, CAL_NEXT_MATCH_NOTE } from "@/lib/calibration/calibrateWording";
 import { CardMatcher } from "./CardMatcher";
 import {
   clampCardWidthCssPx,
@@ -18,8 +19,11 @@ import {
 } from "./cardWidthLimits";
 import { RulerCalibrate } from "./RulerCalibrate";
 
-type Phase = "matching" | "next" | "didnt-agree" | "ruler";
-type NextKind = "second" | "third";
+type Phase = "matching" | "didnt-agree" | "ruler";
+
+function focusOnMount(element: HTMLElement | null): void {
+  element?.focus();
+}
 
 type RoundDisplay = {
   devicePixelRatio: number;
@@ -33,6 +37,7 @@ type CardMatchFlowProps = {
   showDiagnostics: boolean;
   onSave: (calibration: Calibration) => void;
   onCancel?: (() => void) | undefined;
+  focusHeadingOnMount?: boolean | undefined;
 };
 
 function clampedDefaultStartCssPx(viewportWidthCssPx: number): number {
@@ -56,6 +61,16 @@ function matchLabelForRound(attemptCount: number): string {
     return "Match 2 of 2";
   }
   return "Extra match";
+}
+
+function matchNoteForRound(attemptCount: number): string | undefined {
+  if (attemptCount === 1) {
+    return CAL_NEXT_MATCH_NOTE;
+  }
+  if (attemptCount >= 2) {
+    return CAL_EXTRA_MATCH_NOTE;
+  }
+  return undefined;
 }
 
 function closestPairMeanCssPx(
@@ -93,6 +108,7 @@ export function CardMatchFlow({
   showDiagnostics,
   onSave,
   onCancel,
+  focusHeadingOnMount,
 }: CardMatchFlowProps) {
   const [attempts, setAttempts] = useState<CardMatchAttempt[]>([]);
   const [round, setRound] = useState(1);
@@ -103,8 +119,8 @@ export function CardMatchFlow({
   );
   const [attemptKey, setAttemptKey] = useState(0);
   const [phase, setPhase] = useState<Phase>("matching");
-  const [nextKind, setNextKind] = useState<NextKind>("second");
   const [displayChanged, setDisplayChanged] = useState(false);
+  const [focusFreshMatcher, setFocusFreshMatcher] = useState(focusHeadingOnMount === true);
   const [rulerEstimateCssPxPerMm, setRulerEstimateCssPxPerMm] = useState(() =>
     cssPxPerMmFromCardWidth(DEFAULT_CARD_WIDTH_CSS_PX),
   );
@@ -115,6 +131,7 @@ export function CardMatchFlow({
     setRoundDisplay(null);
     setStartCardWidthCssPx(clampedDefaultStartCssPx(deviceContext.viewportWidthCssPx));
     setDisplayChanged(false);
+    setFocusFreshMatcher(true);
     setAttemptKey(attemptKey + 1);
     setPhase("matching");
   }
@@ -136,6 +153,7 @@ export function CardMatchFlow({
       setRoundDisplay(null);
       setStartCardWidthCssPx(clampedDefaultStartCssPx(deviceContext.viewportWidthCssPx));
       setDisplayChanged(true);
+      setFocusFreshMatcher(false);
       setAttemptKey(attemptKey + 1);
       setPhase("matching");
       return;
@@ -155,8 +173,17 @@ export function CardMatchFlow({
     const evaluation = evaluateMatches(roundFinals);
 
     if (evaluation.kind === "need-another") {
-      setNextKind(roundFinals.length === 1 ? "second" : "third");
-      setPhase("next");
+      setStartCardWidthCssPx(
+        pickStartWidthCssPx({
+          previousFinalsCssPx: roundFinals,
+          minCssPx: MIN_CARD_WIDTH_CSS_PX,
+          maxCssPx: maxCardWidthCssPx(deviceContext.viewportWidthCssPx),
+          offsetRandom: Math.random(),
+          directionRandom: Math.random(),
+        }),
+      );
+      setDisplayChanged(false);
+      setAttemptKey(attemptKey + 1);
       return;
     }
 
@@ -195,48 +222,9 @@ export function CardMatchFlow({
     setPhase("didnt-agree");
   }
 
-  function handleStartNextMatch(): void {
-    const roundFinals = attempts.slice(roundStartIndex).map((entry) => entry.cardWidthCssPx);
-    setStartCardWidthCssPx(
-      pickStartWidthCssPx({
-        previousFinalsCssPx: roundFinals,
-        minCssPx: MIN_CARD_WIDTH_CSS_PX,
-        maxCssPx: maxCardWidthCssPx(deviceContext.viewportWidthCssPx),
-        offsetRandom: Math.random(),
-        directionRandom: Math.random(),
-      }),
-    );
-    setDisplayChanged(false);
-    setAttemptKey(attemptKey + 1);
-    setPhase("matching");
-  }
-
   function handleNoBankCard(): void {
     setRulerEstimateCssPxPerMm(cssPxPerMmFromCardWidth(DEFAULT_CARD_WIDTH_CSS_PX));
     setPhase("ruler");
-  }
-
-  if (phase === "next") {
-    const heading = nextKind === "second" ? "Now match it once more" : "Please match it one more time";
-    const body =
-      nextKind === "second"
-        ? "Take the card off the screen. The outline will start at a different size, so match it again from scratch."
-        : "The two matches were a little different. Take the card off the screen first. The outline will start at a different size.";
-    return (
-      <section className="flex w-full max-w-3xl flex-col gap-8">
-        <div className="flex flex-col gap-3 text-left">
-          <h2 className="text-xl font-semibold text-neutral-100">{heading}</h2>
-          <p className="text-neutral-300">{body}</p>
-        </div>
-        <button
-          type="button"
-          onClick={handleStartNextMatch}
-          className="rounded bg-sky-500 px-4 py-2 font-medium text-neutral-950 hover:bg-sky-400"
-        >
-          Start the next match
-        </button>
-      </section>
-    );
   }
 
   if (phase === "didnt-agree") {
@@ -246,7 +234,13 @@ export function CardMatchFlow({
     return (
       <section className="flex w-full max-w-3xl flex-col gap-8">
         <div className="flex flex-col gap-3 text-left">
-          <h2 className="text-xl font-semibold text-neutral-100">The matches didn&apos;t agree</h2>
+          <h2
+            ref={focusOnMount}
+            tabIndex={-1}
+            className="text-xl font-semibold text-neutral-100 outline-none"
+          >
+            The matches didn’t agree
+          </h2>
           <p className="text-neutral-300">
             Your three matches were too far apart to use. You can match the card again from the
             start, or measure a line on the screen with a ruler instead.
@@ -303,7 +297,7 @@ export function CardMatchFlow({
           role="status"
         >
           <p className="text-lg font-medium text-neutral-100">
-            Your screen or zoom changed during the matches, so they&apos;ve started again.
+            Your screen or zoom changed during the matches, so they’ve started again.
           </p>
         </div>
       ) : null}
@@ -314,6 +308,9 @@ export function CardMatchFlow({
         showDiagnostics={showDiagnostics}
         startCardWidthCssPx={startCardWidthCssPx}
         matchLabel={matchLabelForRound(attempts.length - roundStartIndex)}
+        note={matchNoteForRound(attempts.length - roundStartIndex)}
+        showAnimation={attempts.length - roundStartIndex === 0}
+        focusHeadingOnMount={focusFreshMatcher && attempts.length - roundStartIndex === 0}
         onConfirm={handleCardConfirm}
         onCancel={onCancel}
       />

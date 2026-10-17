@@ -16,7 +16,11 @@ import { isPinchZoomed, PINCH_ZOOM_MESSAGE_RULER } from "./pinchGuard";
 
 const INVALID_LENGTH_MESSAGE = "Type the length in mm, for example 98.5.";
 const IMPLAUSIBLE_LENGTH_MESSAGE =
-  "That length doesn't fit this screen. Measure the bar again and check the number.";
+  "That length doesn’t fit this screen. Measure the bar again and check the number.";
+
+function focusOnMount(element: HTMLElement | null): void {
+  element?.focus();
+}
 
 type RulerCalibrateProps = {
   cssPxPerMmEstimate: number;
@@ -99,7 +103,13 @@ export function RulerCalibrate({
   return (
     <section className="flex w-full max-w-3xl flex-col gap-8">
       <div className="flex flex-col gap-3 text-left">
-        <h2 className="text-xl font-semibold text-neutral-100">Measure a line with a ruler</h2>
+        <h2
+          ref={focusOnMount}
+          tabIndex={-1}
+          className="text-xl font-semibold text-neutral-100 outline-none"
+        >
+          Measure a line with a ruler
+        </h2>
         <p className="text-neutral-300">
           Measure the bar below with a ruler and type the length you get in mm, to one decimal
           place.
@@ -161,7 +171,7 @@ export function RulerCalibrate({
           />
         </div>
         <p className="text-sm text-neutral-300">
-          Line up the ruler&apos;s zero mark with the left mark, not the end of the ruler. Many
+          Line up the ruler’s zero mark with the left mark, not the end of the ruler. Many
           rulers have a blank margin before zero.
         </p>
         <p className="text-sm text-neutral-500">

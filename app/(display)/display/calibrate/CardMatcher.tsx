@@ -13,6 +13,15 @@ import {
   zoomSignal,
   type DeviceContext,
 } from "@/lib/calibration";
+import {
+  CAL_SLIDER_HINT,
+  CAL_SLIDER_LABEL,
+  CAL_STEP_1,
+  CAL_STEP_2,
+  CAL_ZOOM_WARNING_BODY,
+  outlineSizeWarning,
+} from "@/lib/calibration/calibrateWording";
+import { CardPlacementAnimation } from "./CardPlacementAnimation";
 import { CardZone } from "./CardZone";
 import { CardWidthSteppers } from "./CardWidthSteppers";
 import {
@@ -22,12 +31,21 @@ import {
 } from "./cardWidthLimits";
 import { isPinchZoomed, PINCH_ZOOM_MESSAGE } from "./pinchGuard";
 
+const CONFIRM_GUARD_MS = 500;
+
+function focusOnMount(element: HTMLElement | null): void {
+  element?.focus();
+}
+
 type CardMatcherProps = {
   deviceContext: DeviceContext;
   outerWidthCssPx: number;
   showDiagnostics: boolean;
   startCardWidthCssPx: number;
   matchLabel: string;
+  note?: string | undefined;
+  showAnimation?: boolean | undefined;
+  focusHeadingOnMount?: boolean | undefined;
   onConfirm: (result: { cardWidthCssPx: number }) => void;
   onCancel?: (() => void) | undefined;
 };
@@ -38,11 +56,16 @@ export function CardMatcher({
   showDiagnostics,
   startCardWidthCssPx,
   matchLabel,
+  note,
+  showAnimation,
+  focusHeadingOnMount,
   onConfirm,
   onCancel,
 }: CardMatcherProps) {
   const sliderRef = useRef<HTMLInputElement>(null);
   const [pinchBlockedMessage, setPinchBlockedMessage] = useState<string | null>(null);
+  const [confirmReady, setConfirmReady] = useState(false);
+  const [widthAdjusted, setWidthAdjusted] = useState(false);
 
   const maxCardWidthCssPx = viewportMaxCardWidthCssPx(deviceContext.viewportWidthCssPx);
 
@@ -62,6 +85,7 @@ export function CardMatcher({
     cssPxPerMm,
   );
   const plausibility = isPlausiblePixelPitch(pitchMm);
+  const outlineWarning = widthAdjusted ? outlineSizeWarning(plausibility) : null;
   const diagonalRounded = Math.round(screenSize.diagonalInches);
   const zoom = zoomSignal(outerWidthCssPx, deviceContext.viewportWidthCssPx);
   const showSizeEstimate = zoom.state === "default" || zoom.state === "unknown";
@@ -82,23 +106,40 @@ export function CardMatcher({
     };
   }, []);
 
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setConfirmReady(true);
+    }, CONFIRM_GUARD_MS);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, []);
+
   function clampWidth(nextCssPx: number): number {
     return clampCardWidthCssPx(nextCssPx, maxCardWidthCssPx);
+  }
+
+  function adjustWidth(nextCssPx: (currentCssPx: number) => number): void {
+    setWidthAdjusted(true);
+    setCardWidthCssPx((current) => clampWidth(nextCssPx(current)));
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLInputElement>): void {
     const stepCssPx = event.shiftKey ? 10 : 1;
     if (event.key === "ArrowLeft") {
       event.preventDefault();
-      setCardWidthCssPx((current) => clampWidth(current - stepCssPx));
+      adjustWidth((current) => current - stepCssPx);
     }
     if (event.key === "ArrowRight") {
       event.preventDefault();
-      setCardWidthCssPx((current) => clampWidth(current + stepCssPx));
+      adjustWidth((current) => current + stepCssPx);
     }
   }
 
   function handleConfirm(): void {
+    if (!confirmReady) {
+      return;
+    }
     if (isPinchZoomed()) {
       setPinchBlockedMessage(PINCH_ZOOM_MESSAGE);
       return;
@@ -111,19 +152,31 @@ export function CardMatcher({
     <section className="flex w-full max-w-3xl flex-col items-center gap-8">
       <div className="flex w-full flex-col gap-3 text-left">
         <p className="w-fit rounded-full bg-sky-500/15 px-3 py-1 text-base font-semibold text-sky-300">{matchLabel}</p>
-        <h2 className="text-xl font-semibold text-neutral-100">Match your bank card</h2>
-        <ol className="list-decimal space-y-2 pl-5 text-neutral-300">
-          <li>Hold a bank card flat against the screen, over the outline.</li>
-          <li>
-            Slide the card slightly up so you can see the bottom edge of the outline and the
-            bottom edge of the card at the same time.
-          </li>
-          <li>
-            Adjust the width with the buttons or slider until the outline is exactly as wide as
-            the card. The left and right edges should line up with the card&apos;s edges, not sit
-            inside them.
-          </li>
-        </ol>
+        <h2
+          ref={focusHeadingOnMount === true ? focusOnMount : undefined}
+          tabIndex={-1}
+          className="text-xl font-semibold text-neutral-100 outline-none"
+        >
+          Match your bank card
+        </h2>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
+          <div className="flex min-w-0 flex-1 flex-col gap-3">
+            {note !== undefined ? (
+              <p ref={focusOnMount} tabIndex={-1} className="text-base text-neutral-300 outline-none">
+                {note}
+              </p>
+            ) : null}
+            <ol className="list-decimal space-y-2 pl-5 text-neutral-300">
+              <li>{CAL_STEP_1}</li>
+              <li>{CAL_STEP_2}</li>
+            </ol>
+          </div>
+          {showAnimation === true ? (
+            <div className="order-first sm:order-last">
+              <CardPlacementAnimation />
+            </div>
+          ) : null}
+        </div>
       </div>
 
       <CardZone>
@@ -176,8 +229,11 @@ export function CardMatcher({
 
       <div className="flex w-full flex-col gap-4">
         <label htmlFor="card-width-slider" className="text-sm text-neutral-400">
-          Card width. Use the buttons, or the arrow keys (hold Shift for bigger steps).
+          {CAL_SLIDER_LABEL}
         </label>
+        <p id="card-width-slider-hint" className="sr-only">
+          {CAL_SLIDER_HINT}
+        </p>
         <div className="flex w-full flex-nowrap items-center gap-3">
           <CardWidthSteppers
             pair="narrower"
@@ -185,18 +241,23 @@ export function CardMatcher({
             maxCssPx={maxCardWidthCssPx}
             valueCssPx={clampedCardWidthCssPx}
             onStep={(deltaCssPx) => {
-              setCardWidthCssPx((current) => clampWidth(current + deltaCssPx));
+              adjustWidth((current) => current + deltaCssPx);
             }}
           />
           <input
             ref={sliderRef}
             id="card-width-slider"
+            aria-describedby="card-width-slider-hint"
+            aria-valuetext={`${Math.round(clampedCardWidthCssPx)} pixels wide`}
             type="range"
             min={MIN_CARD_WIDTH_CSS_PX}
             max={maxCardWidthCssPx}
             step={1}
             value={clampedCardWidthCssPx}
-            onChange={(event) => setCardWidthCssPx(clampWidth(Number(event.target.value)))}
+            onChange={(event) => {
+              const nextCssPx = Number(event.target.value);
+              adjustWidth(() => nextCssPx);
+            }}
             onKeyDown={handleKeyDown}
             className="min-w-0 flex-1 accent-sky-400"
           />
@@ -206,7 +267,7 @@ export function CardMatcher({
             maxCssPx={maxCardWidthCssPx}
             valueCssPx={clampedCardWidthCssPx}
             onStep={(deltaCssPx) => {
-              setCardWidthCssPx((current) => clampWidth(current + deltaCssPx));
+              adjustWidth((current) => current + deltaCssPx);
             }}
           />
         </div>
@@ -214,9 +275,11 @@ export function CardMatcher({
 
       <div className="w-full text-left">
         {showSizeEstimate ? (
-          <p className="text-lg font-medium text-neutral-100">
-            This looks like a {diagonalRounded} inch screen
-          </p>
+          showDiagnostics ? (
+            <p className="text-lg font-medium text-neutral-100">
+              This looks like a {diagonalRounded} inch screen
+            </p>
+          ) : null
         ) : (
           <div
             className="rounded border border-amber-300/60 bg-amber-300/10 p-3"
@@ -225,10 +288,7 @@ export function CardMatcher({
             <p className="text-lg font-medium text-neutral-100">
               Set zoom to 100% and close any side panel
             </p>
-            <p className="mt-1 text-sm text-neutral-300">
-              Press Ctrl+0 (Cmd+0 on Mac) to reset zoom, and close any panel open at the side of the
-              browser. The screen size check comes back once both are done.
-            </p>
+            <p className="mt-1 text-sm text-neutral-300">{CAL_ZOOM_WARNING_BODY}</p>
           </div>
         )}
         {showDiagnostics ? (
@@ -245,10 +305,13 @@ export function CardMatcher({
             })}
           </p>
         ) : null}
-        {!plausibility.ok ? (
-          <p className="mt-2 text-sm text-amber-300" role="status">
-            Check the card edges carefully. {plausibility.reason}
-          </p>
+        <div role="status">
+          {outlineWarning !== null ? (
+            <p className="mt-2 text-sm text-amber-300">{outlineWarning}</p>
+          ) : null}
+        </div>
+        {showDiagnostics && !plausibility.ok ? (
+          <p className="mt-2 font-mono text-xs text-neutral-500">{plausibility.reason}</p>
         ) : null}
         {pinchBlockedMessage !== null ? (
           <p className="mt-2 text-sm text-amber-300" role="status">
@@ -270,6 +333,7 @@ export function CardMatcher({
         <button
           type="button"
           onClick={handleConfirm}
+          disabled={!confirmReady}
           className="rounded bg-sky-500 px-4 py-2 font-medium text-neutral-950 hover:bg-sky-400"
         >
           Confirm

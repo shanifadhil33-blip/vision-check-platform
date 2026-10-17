@@ -1,10 +1,20 @@
 "use client";
 
-import { useState } from "react";
+import Link from "next/link";
+import { useEffect, useState } from "react";
 import { formatDiagnosticsLine, zoomSignal, type Calibration } from "@/lib/calibration";
+import { CAL_CONTINUE, CAL_DONE } from "@/lib/calibration/calibrateWording";
 import { CardMatchFlow } from "./CardMatchFlow";
 import { useCalibration } from "./useCalibration";
 import { VerifyStep } from "./VerifyStep";
+
+const READING_TEXT_DELAY_MS = 300;
+
+const CAL_DONE_ID = "calibration-done";
+
+function focusOnMount(element: HTMLElement | null): void {
+  element?.focus();
+}
 
 function savedCalibrationDetailLine(calibration: Calibration): string {
   let line = `method ${calibration.method}`;
@@ -28,9 +38,21 @@ export function CalibrateFlow({ showDiagnostics }: CalibrateFlowProps) {
   const { ready, calibration, deviceContext, outerWidthCssPx, validity, save, addVerification } =
     useCalibration();
   const [isRecalibrating, setIsRecalibrating] = useState(false);
+  const [readingDelayPassed, setReadingDelayPassed] = useState(false);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setReadingDelayPassed(true);
+    }, READING_TEXT_DELAY_MS);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, []);
 
   if (!ready || deviceContext === null || outerWidthCssPx === null) {
-    return <p className="text-neutral-400">Reading this display…</p>;
+    return (
+      <p className="text-neutral-400">{readingDelayPassed ? "Reading this display…" : null}</p>
+    );
   }
 
   const isValid = calibration !== null && validity?.ok === true;
@@ -60,6 +82,7 @@ export function CalibrateFlow({ showDiagnostics }: CalibrateFlowProps) {
           deviceContext={deviceContext}
           outerWidthCssPx={outerWidthCssPx}
           showDiagnostics={showDiagnostics}
+          focusHeadingOnMount={isRecalibrating}
           onSave={(next) => {
             save(next);
             setIsRecalibrating(false);
@@ -89,7 +112,7 @@ export function CalibrateFlow({ showDiagnostics }: CalibrateFlowProps) {
             {calibration.createdAtIso}
           </p>
         ) : (
-          <p>This screen is calibrated.</p>
+          <p id={CAL_DONE_ID}>{CAL_DONE}</p>
         )}
         {showDiagnostics ? (
           <p className="mt-1 font-mono text-xs text-neutral-500">
@@ -101,17 +124,23 @@ export function CalibrateFlow({ showDiagnostics }: CalibrateFlowProps) {
             {savedCalibrationDetailLine(calibration)}
           </p>
         ) : null}
-        <button
-          type="button"
-          onClick={() => setIsRecalibrating(true)}
-          className="mt-3 rounded border border-neutral-600 px-4 py-2 text-neutral-200 hover:border-neutral-400"
-        >
-          Match card again
-        </button>
-        <p className="mt-2 text-sm text-neutral-500">
-          Calibration is saved per browser. Match the card again if you move to a different
-          screen.
-        </p>
+        <div className="mt-3 flex flex-col items-start gap-3">
+          <Link
+            ref={focusOnMount}
+            aria-describedby={showDiagnostics ? undefined : CAL_DONE_ID}
+            href="/display/test"
+            className="rounded bg-sky-500 px-4 py-2 font-medium text-neutral-950 hover:bg-sky-400"
+          >
+            {CAL_CONTINUE}
+          </Link>
+          <button
+            type="button"
+            onClick={() => setIsRecalibrating(true)}
+            className="rounded border border-neutral-600 px-4 py-2 text-neutral-200 hover:border-neutral-400"
+          >
+            Match the card again
+          </button>
+        </div>
       </div>
       {showDiagnostics ? (
         <VerifyStep

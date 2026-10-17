@@ -1,9 +1,18 @@
+import {
+  PHONE_STILL_WAITING_MS,
+  phoneCanBeStillWaiting,
+  phonePositionWasReset,
+  phoneScreenBeforeFirstLetter,
+  phoneShowsReconnecting,
+} from "@/lib/acuity/autoStart";
+import { PHONE_SESSION_ENDED } from "@/lib/acuity/flowWording";
 import type { SloanLetter } from "@/lib/acuity/sloan";
 import type { VcpError, VcpErrorKind } from "@/lib/db/errors";
 import type { ResponseChoice } from "@/lib/db/payloads";
 import { joinSessionChannel, type SessionChannel } from "@/lib/session/channel";
 import {
   parseLoopState,
+  readyState,
   respondedState,
   type LoopState,
 } from "@/lib/session/loopState";
@@ -11,17 +20,14 @@ import * as sessionStore from "@/lib/session/sessionStore";
 
 type PhoneErrorContext = "answer" | "connect";
 
-const MSG_SESSION_ENDED =
-  "This test has ended on the main screen. Scan the new code there to start again.";
-
 function phoneErrorMessage(kind: VcpErrorKind, context: PhoneErrorContext): string {
   if (kind === "network" || kind === "submission-in-flight") {
     return context === "answer"
-      ? "Couldn't send your answer. Check your connection and tap to try again."
-      : "Couldn't connect to the main screen. Check your connection, then reload this page.";
+      ? "Couldn’t send your answer. Check your connection and tap to try again."
+      : "Couldn’t connect to the main screen. Check your connection, then reload this page.";
   }
   if (kind === "session-not-found") {
-    return MSG_SESSION_ENDED;
+    return PHONE_SESSION_ENDED;
   }
   return context === "answer"
     ? "Something went wrong sending your answer. Tap to try again."
@@ -32,6 +38,8 @@ export type RemoteUiPhase =
   | "loading"
   | "not_found"
   | "connect"
+  | "go_to_mark"
+  | "at_mark"
   | "waiting"
   | "choosing"
   | "sent"
@@ -53,6 +61,16 @@ export type RemoteSnapshot = {
   lastSentLabel: string | null;
   /** Immediate tap highlight while sending. */
   selectedChoice: ResponseChoice | null;
+  /** "I’m at my mark" write in flight. */
+  positionSending: boolean;
+  /** Last "I’m at my mark" write failed. */
+  positionFailed: boolean;
+  /** Sent back to go_to_mark after a tap; cleared by the next successful tap. */
+  positionReset: boolean;
+  /** No phase change for PHONE_STILL_WAITING_MS in at_mark, waiting or sent. */
+  stillWaiting: boolean;
+  /** Three or more refreshes in a row have failed. */
+  reconnecting: boolean;
 };
 
 const POLL_MS = 3000;
@@ -68,6 +86,11 @@ const SERVER_SNAPSHOT: RemoteSnapshot = {
   everSawTrial: false,
   lastSentLabel: null,
   selectedChoice: null,
+  positionSending: false,
+  positionFailed: false,
+  positionReset: false,
+  stillWaiting: false,
+  reconnecting: false,
 };
 
 function sentLabel(choice: ResponseChoice): string {
@@ -85,11 +108,14 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 let catchUpRegistered = false;
 let pollInFlight = false;
 let connectInFlight = false;
+let positionInFlight = false;
 let answerInFlight = false;
 let disposed = false;
 let choicesShownAtMs: number | null = null;
 let lastHandledPresentationId: string | null = null;
 let followedNextSession = false;
+let stillWaitingTimer: ReturnType<typeof setTimeout> | null = null;
+let consecutiveFailedRefreshes = 0;
 
 function emit(next: RemoteSnapshot): void {
   cachedSnapshot = next;
@@ -98,11 +124,53 @@ function emit(next: RemoteSnapshot): void {
   }
 }
 
+function clearStillWaitingTimer(): void {
+  if (stillWaitingTimer !== null) {
+    clearTimeout(stillWaitingTimer);
+    stillWaitingTimer = null;
+  }
+}
+
+function armStillWaiting(phase: RemoteUiPhase): void {
+  clearStillWaitingTimer();
+  if (!phoneCanBeStillWaiting(phase)) {
+    return;
+  }
+  stillWaitingTimer = setTimeout(() => {
+    stillWaitingTimer = null;
+    if (!disposed && cachedSnapshot.phase === phase) {
+      emit({ ...cachedSnapshot, stillWaiting: true });
+    }
+  }, PHONE_STILL_WAITING_MS);
+}
+
 function patch(partial: Partial<RemoteSnapshot>): void {
-  emit({
+  const next: RemoteSnapshot = {
     ...cachedSnapshot,
     ...partial,
-  });
+  };
+  if (next.phase !== cachedSnapshot.phase) {
+    next.stillWaiting = false;
+    armStillWaiting(next.phase);
+  }
+  emit(next);
+}
+
+function noteRefreshFailed(error: unknown): void {
+  consecutiveFailedRefreshes += 1;
+  if (consecutiveFailedRefreshes === 1) {
+    console.error(error);
+  }
+  if (phoneShowsReconnecting(consecutiveFailedRefreshes) && !cachedSnapshot.reconnecting) {
+    patch({ reconnecting: true });
+  }
+}
+
+function noteRefreshSucceeded(): void {
+  consecutiveFailedRefreshes = 0;
+  if (cachedSnapshot.reconnecting) {
+    patch({ reconnecting: false });
+  }
 }
 
 function failWithError(error: VcpError, context: PhoneErrorContext): void {
@@ -180,8 +248,9 @@ function showSessionEnded(): void {
     presentationId: null,
     trialIndex: null,
     choiceLocked: false,
-    errorMessage: MSG_SESSION_ENDED,
+    errorMessage: PHONE_SESSION_ENDED,
     selectedChoice: null,
+    positionFailed: false,
   });
 }
 
@@ -190,7 +259,7 @@ function followNextSession(nextSessionId: string): void {
     return;
   }
   followedNextSession = true;
-  window.location.replace(`/remote?session=${nextSessionId}&follow=1`);
+  window.location.replace(`/remote?session=${nextSessionId}`);
 }
 
 function applyLoopState(state: LoopState | null, status: string | null): void {
@@ -210,6 +279,31 @@ function applyLoopState(state: LoopState | null, status: string | null): void {
       trialIndex: null,
       choiceLocked: false,
       errorMessage: null,
+      positionFailed: false,
+    });
+    return;
+  }
+
+  if (status === "paired" && state !== null && state.phase === "ready") {
+    const current = cachedSnapshot.phase;
+    if (current === "not_found" || current === "error" || current === "complete") {
+      return;
+    }
+    const next =
+      phoneScreenBeforeFirstLetter("paired", state.positionConfirmed === true) ?? "go_to_mark";
+    if (current === next) {
+      return;
+    }
+    patch({
+      phase: next,
+      choices: [],
+      presentationId: null,
+      trialIndex: null,
+      choiceLocked: false,
+      errorMessage: null,
+      selectedChoice: null,
+      positionFailed: false,
+      positionReset: phonePositionWasReset(current, next) ? true : cachedSnapshot.positionReset,
     });
     return;
   }
@@ -237,6 +331,7 @@ function applyLoopState(state: LoopState | null, status: string | null): void {
         everSawTrial: true,
         lastSentLabel: null,
         selectedChoice: null,
+        positionFailed: false,
       });
     }
     return;
@@ -250,6 +345,7 @@ function applyLoopState(state: LoopState | null, status: string | null): void {
         presentationId: null,
         trialIndex: null,
         choiceLocked: false,
+        positionFailed: false,
       });
     }
     return;
@@ -258,17 +354,30 @@ function applyLoopState(state: LoopState | null, status: string | null): void {
   if (
     cachedSnapshot.phase === "connect" ||
     cachedSnapshot.phase === "loading" ||
+    cachedSnapshot.phase === "go_to_mark" ||
+    cachedSnapshot.phase === "at_mark" ||
     cachedSnapshot.phase === "waiting" ||
     cachedSnapshot.phase === "sent"
   ) {
     if (status === "paired" || status === "running") {
+      const beforeFirstLetter = cachedSnapshot.everSawTrial
+        ? null
+        : phoneScreenBeforeFirstLetter(
+            status,
+            state !== null && state.phase === "ready" && state.positionConfirmed === true,
+          );
+      const next = beforeFirstLetter ?? "waiting";
       patch({
-        phase: "waiting",
+        phase: next,
         choices: [],
         presentationId: null,
         trialIndex: null,
         choiceLocked: false,
         errorMessage: null,
+        positionFailed: false,
+        positionReset: phonePositionWasReset(cachedSnapshot.phase, next)
+          ? true
+          : cachedSnapshot.positionReset,
       });
     }
   }
@@ -286,11 +395,15 @@ async function refreshFromServer(): Promise<void> {
       showSessionEnded();
       return;
     }
+    if (loaded.error.kind !== "stale-read" && !disposed) {
+      noteRefreshFailed(loaded.error);
+    }
     return;
   }
   if (disposed) {
     return;
   }
+  noteRefreshSucceeded();
   applyLoopState(parseLoopState(loaded.data.currentState), loaded.data.status);
 }
 
@@ -324,7 +437,7 @@ export function watchRemote(sessionId: string): void {
   registerCatchUp();
 }
 
-export async function bootstrap(sessionId: string, follow = false): Promise<void> {
+export async function bootstrap(sessionId: string): Promise<void> {
   disposed = false;
   patch({
     phase: "loading",
@@ -355,13 +468,15 @@ export async function bootstrap(sessionId: string, follow = false): Promise<void
 
   if (loaded.data.status === "created") {
     patch({ phase: "connect", errorMessage: null });
-    if (follow) {
-      await connect();
-    }
+    await connect();
     return;
   }
 
-  applyLoopState(parseLoopState(loaded.data.currentState), loaded.data.status);
+  const loopState = parseLoopState(loaded.data.currentState);
+  if (loaded.data.status === "running" && loopState !== null && loopState.phase === "responded") {
+    patch({ everSawTrial: true });
+  }
+  applyLoopState(loopState, loaded.data.status);
   if (cachedSnapshot.phase === "loading") {
     patch({ phase: "waiting", errorMessage: null });
   }
@@ -386,12 +501,90 @@ export async function connect(): Promise<void> {
       failWithError(result.error, "connect");
       return;
     }
-    patch({ phase: "waiting", errorMessage: null });
+    patch({
+      phase: phoneScreenBeforeFirstLetter(result.data.status, false) ?? "waiting",
+      errorMessage: null,
+    });
     if (channel !== null) {
       await channel.sendNudge("paired");
     }
   } finally {
     connectInFlight = false;
+  }
+}
+
+type PositionAttempt = "ok" | "conflict" | { failed: unknown };
+
+async function writePositionOnce(sessionId: string): Promise<PositionAttempt> {
+  const reloaded = await sessionStore.loadSession(sessionId);
+  if (!reloaded.ok) {
+    if (reloaded.error.kind === "stale-read") {
+      return "conflict";
+    }
+    return { failed: reloaded.error };
+  }
+  const state = parseLoopState(reloaded.data.currentState);
+  if (reloaded.data.status !== "paired" || state === null || state.phase !== "ready") {
+    return { failed: { status: reloaded.data.status, state } };
+  }
+  if (state.positionConfirmed === true) {
+    return "ok";
+  }
+  const written = await sessionStore.setState(
+    "paired",
+    readyState(state.run, { positionConfirmed: true }),
+  );
+  if (written.ok) {
+    return "ok";
+  }
+  if (written.error.kind === "version-conflict") {
+    return "conflict";
+  }
+  return { failed: written.error };
+}
+
+/** The customer's tap at their mark. The main screen starts only after this write. */
+export async function confirmPosition(): Promise<void> {
+  if (positionInFlight || disposed) {
+    return;
+  }
+  if (cachedSnapshot.phase !== "go_to_mark") {
+    return;
+  }
+  const sessionId = cachedSnapshot.sessionId;
+  if (sessionId === null) {
+    return;
+  }
+
+  positionInFlight = true;
+  patch({ positionSending: true, positionFailed: false });
+  try {
+    let outcome = await writePositionOnce(sessionId);
+    if (outcome === "conflict") {
+      outcome = await writePositionOnce(sessionId);
+    }
+    if (disposed) {
+      return;
+    }
+    if (outcome !== "ok") {
+      console.error(outcome === "conflict" ? "version-conflict after retry" : outcome.failed);
+      if (cachedSnapshot.phase === "go_to_mark") {
+        patch({ positionFailed: true });
+      }
+      return;
+    }
+    if (channel !== null) {
+      await channel.sendNudge("paired");
+    }
+    patch({ positionReset: false });
+    if (cachedSnapshot.phase === "go_to_mark") {
+      patch({ phase: "at_mark", positionFailed: false });
+    }
+  } finally {
+    positionInFlight = false;
+    if (!disposed) {
+      patch({ positionSending: false });
+    }
   }
 }
 
@@ -607,7 +800,10 @@ export function disposeRemote(): void {
   disposed = true;
   stopPoll();
   leaveChannel();
+  clearStillWaitingTimer();
+  consecutiveFailedRefreshes = 0;
   connectInFlight = false;
+  positionInFlight = false;
   answerInFlight = false;
   choicesShownAtMs = null;
   lastHandledPresentationId = null;

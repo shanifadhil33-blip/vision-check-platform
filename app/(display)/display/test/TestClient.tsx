@@ -14,15 +14,37 @@ import {
   resultSentence,
 } from "@/lib/acuity";
 import { PRIVACY_NOTICE } from "@/lib/acuity/resultWording";
+import {
+  DEFAULT_TEST_DISTANCE_MM,
+  DISTANCE_CONFIRM_LABEL,
+  DISTANCE_HEADING,
+  DISTANCE_INSTRUCTION,
+  DISTANCE_PHONE_NOTE,
+  MSG_DISTANCE_NOT_CONFIRMED,
+  MSG_SETUP_FAILED,
+} from "@/lib/acuity/distanceSetup";
+import {
+  BACK_TO_START,
+  MSG_CHOOSE_WEARING,
+  QR_ALT,
+  REFRESH_PAGE,
+  RESULT_UNAVAILABLE_HEADING,
+  START_NEW_TEST,
+  STOPPED_HEADING,
+  stopReasonText,
+} from "@/lib/acuity/flowWording";
 import type { RunContext, RunResult } from "@/lib/session/loopState";
 import { TripletCanvas } from "./TripletCanvas";
+import { MAIN_GO_TO_MARK, MAIN_PHONE_CONNECTED } from "@/lib/acuity/autoStart";
 import {
-  beginTrials,
+  backToStart,
   checkSetupNow,
+  closeSessionById,
   dispose,
   getServerSnapshot,
   getSnapshot,
   handleCanvasMeasured,
+  MSG_CONNECTION,
   MSG_SESSION_CANNOT_CONTINUE,
   prepareTestAgain,
   resume,
@@ -36,10 +58,18 @@ import {
 const CORRECTION_CHOICES = ["none", "contacts", "glasses"] as const satisfies readonly RunContext["correction"][];
 
 const PAIRING_INSTRUCTION =
-  "Scan this code with your phone's camera to use it for your answers.";
+  "Scan this code with your phone’s camera to use it for your answers.";
 
 const SESSION_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const CHECKING_TEXT_DELAY_MS = 300;
+
+const PRIMARY_LARGE_ACTION_CLASS =
+  "inline-flex min-h-14 items-center justify-center rounded bg-sky-600 px-6 text-lg font-medium text-white hover:bg-sky-500";
+
+const SECONDARY_ACTION_CLASS =
+  "min-h-11 rounded border border-neutral-600 px-4 py-2 text-base font-medium text-neutral-100 hover:border-neutral-400";
 
 const diagListeners = new Set<() => void>();
 let diagEnabled = false;
@@ -77,11 +107,15 @@ function correctionButtonClass(selected: boolean): string {
 export default function TestClient() {
   const { ready, calibration, validity } = useCalibration();
   const snap = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
-  const [distanceMm, setDistanceMm] = useState<3000 | 2000>(3000);
+  const [distanceConfirmed, setDistanceConfirmed] = useState(false);
   const [format, setFormat] = useState<SessionFormat>("flanked-triplet");
   const [correction, setCorrection] = useState<RunContext["correction"] | null>(null);
+  const [startHint, setStartHint] = useState<"wearing" | "distance" | null>(null);
+  const [checkingDelayPassed, setCheckingDelayPassed] = useState(false);
   const showDiag = useSyncExternalStore(subscribeDiag, diagSnapshot, diagServerSnapshot);
+  const pairingInstructionRef = useRef<HTMLParagraphElement>(null);
   const resumeStarted = useRef(false);
+  const invalidCloseStarted = useRef(false);
   const validityOkRef = useRef(false);
   const zoomStateRef = useRef<ZoomSignalState>("unknown");
   const viewportWidthCssPxRef = useRef(0);
@@ -94,16 +128,19 @@ export default function TestClient() {
   }, []);
 
   useEffect(() => {
-    if (snap.phase !== "idle" && snap.phase !== "error") {
-      return;
+    const timer = setTimeout(() => {
+      setCheckingDelayPassed(true);
+    }, CHECKING_TEXT_DELAY_MS);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (snap.phase === "waiting_for_phone") {
+      pairingInstructionRef.current?.focus();
     }
-    if (snap.distanceMm !== 2000 && snap.distanceMm !== 3000) {
-      return;
-    }
-    // The selector stays local after this, so a later choice is not overwritten.
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- copy the finished test distance only when phase or distance changes
-    setDistanceMm(snap.distanceMm);
-  }, [snap.phase, snap.distanceMm]);
+  }, [snap.phase]);
 
   useEffect(() => {
     function syncProbeWindow(): void {
@@ -168,41 +205,99 @@ export default function TestClient() {
     void resume(raw, calibration, window.innerWidth, window.innerHeight);
   }, [ready, calibration, validity]);
 
+  useEffect(() => {
+    if (invalidCloseStarted.current || resumeStarted.current) {
+      return;
+    }
+    if (!ready || (calibration !== null && validity !== null && validity.ok)) {
+      return;
+    }
+    const raw = new URLSearchParams(window.location.search).get("session");
+    if (raw === null || !SESSION_UUID_RE.test(raw)) {
+      return;
+    }
+    invalidCloseStarted.current = true;
+    void closeSessionById(raw);
+  }, [ready, calibration, validity]);
+
+  const calibrateHref = showDiag ? "/display/calibrate?diag=1" : "/display/calibrate";
+
+  function goBackToStart(): void {
+    setCorrection(null);
+    setStartHint(null);
+    void backToStart();
+  }
+
   if (!ready) {
     return (
       <main className="flex flex-1 items-center justify-center px-6 text-neutral-400">
-        Checking calibration…
+        {checkingDelayPassed ? "Checking calibration…" : null}
       </main>
     );
   }
 
-  if (snap.phase === "stopped") {
+  if (snap.phase === "stopped" || (snap.phase === "error" && snap.sessionId !== null)) {
+    const stopped = snap.phase === "stopped";
+    const reasonText = stopped ? stopReasonText(snap.stopReason) : null;
+    const setUpScreenAgain =
+      stopped && (snap.stopReason === "calibration" || snap.stopReason === null);
+    const refreshToCarryOn =
+      !stopped &&
+      (snap.errorMessage === MSG_CONNECTION || snap.errorMessage === MSG_SETUP_FAILED);
     return (
-      <main className="mx-auto flex w-full max-w-xl flex-1 flex-col items-center justify-center gap-4 px-6 py-10 text-center">
-        <p className="text-neutral-300">{snap.errorMessage}</p>
+      <main className="mx-auto flex w-full max-w-xl flex-1 flex-col items-center justify-center gap-6 px-6 py-10 text-center">
+        <p className="text-3xl font-semibold text-neutral-100">
+          {stopped ? STOPPED_HEADING : (snap.errorMessage ?? MSG_SESSION_CANNOT_CONTINUE)}
+        </p>
+        {reasonText !== null && (
+          <p className="text-2xl leading-relaxed text-neutral-300">{reasonText}</p>
+        )}
         {showDiag && snap.errorDetail !== null && (
           <p className="text-xs text-neutral-500">{snap.errorDetail}</p>
         )}
-        <Link
-          href="/display/calibrate"
-          className="text-sky-400 underline underline-offset-4 hover:text-sky-300"
-        >
-          Set up your screen
-        </Link>
+        {setUpScreenAgain ? (
+          <Link href={calibrateHref} className={PRIMARY_LARGE_ACTION_CLASS}>
+            Set up your screen
+          </Link>
+        ) : refreshToCarryOn ? (
+          <button
+            type="button"
+            onClick={() => {
+              window.location.reload();
+            }}
+            className={PRIMARY_LARGE_ACTION_CLASS}
+          >
+            {REFRESH_PAGE}
+          </button>
+        ) : (
+          <button type="button" onClick={goBackToStart} className={PRIMARY_LARGE_ACTION_CLASS}>
+            {START_NEW_TEST}
+          </button>
+        )}
       </main>
     );
   }
 
-  if (calibration === null || validity === null || !validity.ok) {
+  if (snap.sessionId === null && (calibration === null || validity === null || !validity.ok)) {
     return (
       <main className="mx-auto flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
         <p className="text-neutral-300">Please set up your screen before the test.</p>
         <Link
-          href="/display/calibrate"
+          href={calibrateHref}
           className="text-sky-400 underline underline-offset-4 hover:text-sky-300"
         >
           Set up your screen
         </Link>
+      </main>
+    );
+  }
+
+  if (snap.phase === "countdown") {
+    return (
+      <main className="flex flex-1 items-center justify-center px-6">
+        <p aria-live="polite" className="text-center text-9xl font-semibold text-neutral-100">
+          {snap.countdownValue === null ? "" : `${snap.countdownValue}…`}
+        </p>
       </main>
     );
   }
@@ -213,9 +308,16 @@ export default function TestClient() {
   ) {
     const logMar =
       snap.currentStepIndex === null ? 0 : snap.currentStepIndex / 10;
-    const distance = snap.distanceMm ?? distanceMm;
-    const cssPxPerMm = snap.cssPxPerMm ?? calibration.cssPxPerMm;
-    const devicePixelRatio = snap.devicePixelRatio ?? calibration.devicePixelRatio;
+    const distance = snap.distanceMm;
+    const cssPxPerMm = snap.cssPxPerMm ?? calibration?.cssPxPerMm ?? null;
+    const devicePixelRatio = snap.devicePixelRatio ?? calibration?.devicePixelRatio ?? null;
+    if (distance === null || cssPxPerMm === null || devicePixelRatio === null) {
+      return (
+        <main className="mx-auto flex w-full max-w-xl flex-1 flex-col gap-6 px-6 py-10">
+          <p className="text-base text-neutral-300">Setting up…</p>
+        </main>
+      );
+    }
 
     if (
       snap.format === "flanked-triplet" &&
@@ -255,6 +357,7 @@ export default function TestClient() {
   }
 
   const showFlankersColumn = snap.format === "flanked-triplet";
+  const resultAvailable = snap.result !== null && snap.correction !== null;
 
   return (
     <main className="mx-auto flex w-full max-w-xl flex-1 flex-col gap-6 px-6 py-10">
@@ -268,47 +371,58 @@ export default function TestClient() {
             {WEARING_QUESTION}
           </h1>
           <div
-            role="group"
+            role="radiogroup"
             aria-labelledby="wearing-question"
             className="flex flex-col gap-3"
           >
             {CORRECTION_CHOICES.map((choice) => {
               const selected = correction === choice;
               return (
-                <button
+                <label
                   key={choice}
-                  type="button"
-                  aria-pressed={selected}
-                  onClick={() => {
-                    setCorrection(choice);
-                  }}
-                  className={correctionButtonClass(selected)}
+                  className={`${correctionButtonClass(selected)} cursor-pointer has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-sky-400`}
                 >
+                  <input
+                    type="radio"
+                    name="correction"
+                    value={choice}
+                    checked={selected}
+                    onChange={() => {
+                      setCorrection(choice);
+                      if (startHint === "wearing") {
+                        setStartHint(null);
+                      }
+                    }}
+                    className="sr-only"
+                  />
                   {CORRECTION_OPTIONS[choice]}
-                </button>
+                </label>
               );
             })}
           </div>
           <p className="text-base leading-relaxed text-neutral-300">{SAFETY_NOTICE}</p>
           <p className="text-base leading-relaxed text-neutral-300">{PRIVACY_NOTICE}</p>
-          <label className="flex flex-col gap-1 text-sm text-neutral-300">
-            Viewing distance
-            <select
-              value={distanceMm}
-              onChange={(event) => {
-                const value = event.target.value;
-                if (value === "2000") {
-                  setDistanceMm(2000);
-                  return;
-                }
-                setDistanceMm(3000);
-              }}
-              className="rounded border border-neutral-600 bg-neutral-950 px-3 py-2"
-            >
-              <option value={3000}>3 m (3000 mm)</option>
-              <option value={2000}>2 m (2000 mm)</option>
-            </select>
-          </label>
+          <section aria-labelledby="distance-heading" className="flex flex-col gap-3">
+            <h2 id="distance-heading" className="text-xl font-semibold text-neutral-100">
+              {DISTANCE_HEADING}
+            </h2>
+            <p className="text-base leading-relaxed text-neutral-300">{DISTANCE_INSTRUCTION}</p>
+            <p className="text-base leading-relaxed text-neutral-300">{DISTANCE_PHONE_NOTE}</p>
+            <label className="flex min-h-11 cursor-pointer items-center gap-3 text-base text-neutral-100">
+              <input
+                type="checkbox"
+                checked={distanceConfirmed}
+                onChange={(event) => {
+                  setDistanceConfirmed(event.target.checked);
+                  if (event.target.checked && startHint === "distance") {
+                    setStartHint(null);
+                  }
+                }}
+                className="h-5 w-5 shrink-0 cursor-pointer"
+              />
+              {DISTANCE_CONFIRM_LABEL}
+            </label>
+          </section>
           {showDiag && (
             <label className="flex flex-col gap-1 text-sm text-neutral-300">
               Format
@@ -331,13 +445,21 @@ export default function TestClient() {
           )}
           <button
             type="button"
-            disabled={correction === null}
             onClick={() => {
               if (correction === null) {
+                setStartHint("wearing");
                 return;
               }
+              if (!distanceConfirmed) {
+                setStartHint("distance");
+                return;
+              }
+              if (calibration === null) {
+                return;
+              }
+              setStartHint(null);
               void start(
-                distanceMm,
+                { distanceMm: DEFAULT_TEST_DISTANCE_MM, confirmed: distanceConfirmed },
                 calibration,
                 format,
                 window.innerWidth,
@@ -349,9 +471,16 @@ export default function TestClient() {
           >
             Start
           </button>
-          {snap.phase === "error" && snap.errorMessage !== null && (
+          {startHint !== null && (
+            <p role="alert" className="text-base text-neutral-300">
+              {startHint === "wearing" ? MSG_CHOOSE_WEARING : MSG_DISTANCE_NOT_CONFIRMED}
+            </p>
+          )}
+          {startHint === null && snap.phase === "error" && snap.errorMessage !== null && (
             <>
-              <p className="text-base text-neutral-300">{snap.errorMessage}</p>
+              <p role="alert" className="text-base text-neutral-300">
+                {snap.errorMessage}
+              </p>
               {showDiag && snap.errorDetail !== null && (
                 <p className="text-xs text-neutral-500">{snap.errorDetail}</p>
               )}
@@ -360,51 +489,63 @@ export default function TestClient() {
         </section>
       )}
 
-      {snap.phase === "creating" && (
-        <p className="text-base text-neutral-300">Setting up…</p>
-      )}
-
-      {(snap.phase === "waiting_for_phone" || snap.phase === "ready") && (
-        <section className="flex flex-col items-center gap-4">
-          {snap.qrDataUrl !== null && (
+      {(snap.phase === "creating" ||
+        snap.phase === "waiting_for_phone" ||
+        snap.phase === "ready") && (
+        <section
+          className={`flex flex-col items-center text-center ${snap.phase === "waiting_for_phone" ? "gap-4" : "gap-6"}`}
+        >
+          {snap.phase === "waiting_for_phone" && snap.qrDataUrl !== null && (
             <Image
               src={snap.qrDataUrl}
-              alt="QR code linking to the remote phone page"
+              alt={QR_ALT}
               width={280}
               height={280}
               unoptimized
               className="rounded bg-white p-2"
             />
           )}
-          <p className="text-center text-base text-neutral-200">{PAIRING_INSTRUCTION}</p>
-          {showDiag && snap.remoteUrl !== null && (
+          {snap.phase === "waiting_for_phone" && (
+            <p
+              ref={pairingInstructionRef}
+              tabIndex={-1}
+              className="text-center text-base text-neutral-200 outline-none"
+            >
+              {PAIRING_INSTRUCTION}
+            </p>
+          )}
+          {snap.phase === "waiting_for_phone" && showDiag && snap.remoteUrl !== null && (
             <p className="w-full select-all break-all rounded border border-neutral-700 bg-neutral-900 px-3 py-2 text-left text-sm text-sky-300">
               {snap.remoteUrl}
             </p>
           )}
-          {snap.phase === "waiting_for_phone" && (
-            <p className="text-neutral-400">Waiting for the phone to connect…</p>
-          )}
-          {snap.phase === "ready" && (
-            <>
-              <p className="text-emerald-400">Phone connected.</p>
-              <button
-                type="button"
-                onClick={() => {
-                  void beginTrials();
-                }}
-                className="rounded bg-emerald-600 px-4 py-3 text-base font-medium text-white hover:bg-emerald-500"
-              >
-                Start trials
-              </button>
-            </>
+          <div role="status" className="flex w-full flex-col gap-6">
+            {snap.phase === "creating" && (
+              <p className="text-left text-base text-neutral-300">Setting up…</p>
+            )}
+            {snap.phase === "waiting_for_phone" && (
+              <p className="text-neutral-400">Waiting for the phone to connect…</p>
+            )}
+            {snap.phase === "ready" && (
+              <>
+                <p className="text-2xl text-emerald-400">{MAIN_PHONE_CONNECTED}</p>
+                <p className="text-2xl leading-relaxed text-neutral-100">{MAIN_GO_TO_MARK}</p>
+              </>
+            )}
+          </div>
+          {snap.phase !== "creating" && (
+            <button type="button" onClick={goBackToStart} className={SECONDARY_ACTION_CLASS}>
+              {BACK_TO_START}
+            </button>
           )}
         </section>
       )}
 
       {snap.phase === "complete" && (
         <section className="flex flex-col gap-4">
-          <h1 className="text-2xl font-semibold text-neutral-100">Your result</h1>
+          <h1 className="text-2xl font-semibold text-neutral-100">
+            {resultAvailable ? "Your result" : RESULT_UNAVAILABLE_HEADING}
+          </h1>
           <p className="text-xl leading-relaxed text-neutral-100">
             {snap.result !== null && snap.correction !== null
               ? resultSentence(snap.result, snap.correction)
@@ -412,16 +553,26 @@ export default function TestClient() {
           </p>
           <p className="text-base leading-relaxed text-neutral-300">{DISTANCE_ONLY_NOTICE}</p>
           <p className="text-base leading-relaxed text-neutral-300">{SAFETY_NOTICE}</p>
-          <button
-            type="button"
-            onClick={() => {
-              setCorrection(null);
-              prepareTestAgain();
-            }}
-            className="rounded bg-sky-600 px-4 py-3 text-base font-medium text-white hover:bg-sky-500"
-          >
-            Test again with a different option
-          </button>
+          {resultAvailable ? (
+            <button
+              type="button"
+              onClick={() => {
+                setCorrection(null);
+                prepareTestAgain();
+              }}
+              className="rounded bg-sky-600 px-4 py-3 text-base font-medium text-white hover:bg-sky-500"
+            >
+              Test again with a different option
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={goBackToStart}
+              className="rounded bg-sky-600 px-4 py-3 text-base font-medium text-white hover:bg-sky-500"
+            >
+              {START_NEW_TEST}
+            </button>
+          )}
           {showDiag && (
             <div className="flex flex-col gap-4">
               <p className="text-sm text-neutral-400">

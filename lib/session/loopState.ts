@@ -16,7 +16,7 @@ export type RunResult =
   | { kind: "not-measurable"; coarsestStepIndex: number };
 
 export type LoopState =
-  | { phase: "ready"; run: RunContext | null }
+  | { phase: "ready"; run: RunContext | null; positionConfirmed?: boolean }
   | {
       phase: "awaiting_response";
       trialIndex: number;
@@ -194,7 +194,14 @@ export function parseLoopState(value: unknown): LoopState | null {
   const run = parseRunContext(value.run);
   const phase = value.phase;
   if (phase === "ready") {
-    return { phase: "ready", run };
+    const positionConfirmed = value.positionConfirmed;
+    if (positionConfirmed === undefined) {
+      return { phase: "ready", run };
+    }
+    if (typeof positionConfirmed !== "boolean") {
+      return null;
+    }
+    return { phase: "ready", run, positionConfirmed };
   }
   if (phase === "complete") {
     if (!isNonNegInt(value.trialsCompleted)) {
@@ -302,8 +309,16 @@ function withRun(body: { [key: string]: Json }, run: RunContext | null | undefin
   return body;
 }
 
-export function readyState(run?: RunContext | null): Json {
-  return withRun({ phase: "ready" }, run);
+/** positionConfirmed is written only when true, so every other ready write clears it. */
+export function readyState(
+  run?: RunContext | null,
+  options?: { positionConfirmed?: boolean },
+): Json {
+  const body: { [key: string]: Json } = { phase: "ready" };
+  if (options?.positionConfirmed === true) {
+    body.positionConfirmed = true;
+  }
+  return withRun(body, run);
 }
 
 export function awaitingResponseState(args: {

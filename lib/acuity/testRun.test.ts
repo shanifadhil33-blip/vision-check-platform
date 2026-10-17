@@ -210,6 +210,8 @@ describe("testQualityPayload", () => {
       }),
     ).toEqual({
       distance_requested_mm: 2000,
+      distance_recommended_mm: 3000,
+      distance_chosen_mm: 2000,
       renderable_finest_logmar: -0.1,
       renderable_coarsest_logmar: 1,
       finest_limited_by: "requested-bound",
@@ -278,6 +280,29 @@ describe("testQualityPayload", () => {
     expect(payload.screen_limited).toBe(false);
     expect(payload.bounded_result_reason).toBe("measured");
     expect(payload.final_snellen_label).toBe("6/9");
+  });
+
+  it("Q6 records 3000 mm as requested, chosen and recommended for a new 3 m test", () => {
+    const payload = testQualityPayload({
+      result: { kind: "measured", stepIndex: 2 },
+      run: runWith({ stepIndices: FULL_STEPS }),
+      distanceMm: 3000,
+      notSureCount: 0,
+    });
+    expect(payload.distance_requested_mm).toBe(3000);
+    expect(payload.distance_chosen_mm).toBe(3000);
+    expect(payload.distance_recommended_mm).toBe(3000);
+  });
+
+  it("Q7 records a resumed 2000 mm session as chosen 2000 with 3000 recommended", () => {
+    const payload = testQualityPayload({
+      result: { kind: "measured", stepIndex: 2 },
+      run: runWith({ stepIndices: FULL_STEPS }),
+      distanceMm: 2000,
+      notSureCount: 0,
+    });
+    expect(payload.distance_chosen_mm).toBe(2000);
+    expect(payload.distance_recommended_mm).toBe(3000);
   });
 });
 

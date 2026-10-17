@@ -8,6 +8,24 @@ import { buildTrialChoices, pickFlankers } from "@/lib/acuity/thinLoop";
 import type { SloanLetter } from "@/lib/acuity/sloan";
 import { computeTestLevels } from "@/lib/acuity/testLevels";
 import {
+  afterCountdown,
+  autoStartDecision,
+  COUNTDOWN_NUMBERS,
+  COUNTDOWN_STEP_MS,
+  MSG_ZOOM_AT_START,
+  zoomBlocksStart,
+} from "@/lib/acuity/autoStart";
+import {
+  ALLOWED_TEST_DISTANCES_MM,
+  checkDistanceBeforeStart,
+  MSG_DISTANCE_NOT_CONFIRMED,
+  MSG_SCREEN_CANNOT_SHOW_AT_3M,
+  MSG_SETUP_FAILED,
+  storedDistanceMatches,
+  type DistanceConfirmation,
+} from "@/lib/acuity/distanceSetup";
+import { MSG_LETTER_NOT_MEASURED, STOPPED_HEADING } from "@/lib/acuity/flowWording";
+import {
   pickNextTarget,
   recordTrial,
   startStaircase,
@@ -41,6 +59,7 @@ import {
   startVisibilityTracking,
   stopVisibilityTracking,
 } from "./visibilityTracker";
+import { releaseScreenAwake, requestScreenAwake } from "./wakeLock";
 
 export type TestPhase =
   | "idle"
@@ -48,6 +67,7 @@ export type TestPhase =
   | "resuming"
   | "waiting_for_phone"
   | "ready"
+  | "countdown"
   | "presenting"
   | "awaiting_response"
   | "complete"
@@ -92,6 +112,8 @@ export type TestSnapshot = {
   result: RunResult | null;
   notSureCount: number;
   errorDetail: string | null;
+  countdownValue: number | null;
+  stopReason: "calibration" | "zoom" | "window" | null;
 };
 
 type ActiveTrial = {
@@ -125,12 +147,9 @@ type SetupProbe = () => {
 type RespondedState = Extract<LoopState, { phase: "responded" }>;
 
 const POLL_MS = 3000;
-const CLIENT_BUILD = "m4-staircase-1";
+const CLIENT_BUILD = "m6-distance-3";
 
-const MSG_CONNECTION = "The test lost its connection. Refresh the page to carry on.";
-const MSG_SETUP_CHANGED =
-  "Your screen settings changed during the test, so it has stopped. Please set up your screen again and start a new test.";
-const MSG_SCREEN_CANNOT_SHOW = "This screen can't show the test letters at this distance.";
+export const MSG_CONNECTION = "The test lost its connection. Refresh the page to carry on.";
 const MSG_SESSION_ENDED = "This test has ended. Start a new test to continue.";
 export const MSG_SESSION_CANNOT_CONTINUE =
   "This test cannot be continued. Start a new test to continue.";
@@ -157,6 +176,8 @@ const SERVER_SNAPSHOT: TestSnapshot = {
   result: null,
   notSureCount: 0,
   errorDetail: null,
+  countdownValue: null,
+  stopReason: null,
 };
 
 const listeners = new Set<() => void>();
@@ -170,10 +191,12 @@ let activeTrial: ActiveTrial | null = null;
 let history: CompletedTrial[] = [];
 let channel: SessionChannel | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+let countdownTimer: ReturnType<typeof setTimeout> | null = null;
 let pollInFlight = false;
 let startInFlight = false;
 let resumeInFlight = false;
 let beginInFlight = false;
+let distanceAbandonInFlight = false;
 let measureInFlight = false;
 let advanceInFlight = false;
 let disposed = false;
@@ -181,6 +204,8 @@ let resumeGeneration = 0;
 let setupProbe: SetupProbe | null = null;
 let setupStopped = false;
 let skippingDuplicateTrial = false;
+let backInFlight = false;
+let endedSessionClose: Promise<void> | null = null;
 let visibilityGeneration = 0;
 let visibilityChain: Promise<void> = Promise.resolve();
 let stateChain: Promise<void> = Promise.resolve();
@@ -206,13 +231,25 @@ function isSessionUuid(value: string): boolean {
   return SESSION_UUID_RE.test(value);
 }
 
+function testUrl(sessionId: string | null): string {
+  const params = new URLSearchParams();
+  if (sessionId !== null) {
+    params.set("session", sessionId);
+  }
+  const diag = new URLSearchParams(window.location.search).get("diag");
+  if (diag !== null) {
+    params.set("diag", diag);
+  }
+  const query = params.toString();
+  return query === "" ? window.location.pathname : `${window.location.pathname}?${query}`;
+}
+
 function setSessionIdInUrl(sessionId: string): void {
-  const nextUrl = `${window.location.pathname}?session=${sessionId}`;
-  window.history.replaceState(window.history.state, "", nextUrl);
+  window.history.replaceState(window.history.state, "", testUrl(sessionId));
 }
 
 function clearSessionIdFromUrl(): void {
-  window.history.replaceState(window.history.state, "", window.location.pathname);
+  window.history.replaceState(window.history.state, "", testUrl(null));
 }
 
 function detailText(detail: unknown): string {
@@ -287,11 +324,85 @@ function enqueueState<T>(fn: () => Promise<T>): Promise<T> {
   return result;
 }
 
+type WriteResult = Awaited<ReturnType<typeof sessionStore.setState>>;
+
 function writeState(
-  status: "created" | "running" | "complete" | "abandoned",
+  status: "created" | "paired" | "running" | "complete" | "abandoned",
   currentState: Json,
-): Promise<Awaited<ReturnType<typeof sessionStore.setState>>> {
+): Promise<WriteResult> {
   return enqueueState(() => sessionStore.setState(status, currentState));
+}
+
+/**
+ * On a version conflict, reloads once and writes again. A session that the
+ * reload shows complete or abandoned is not written.
+ */
+async function writePairedRetryOnce(currentState: Json): Promise<WriteResult> {
+  const first = await writeState("paired", currentState);
+  if (first.ok || first.error.kind !== "version-conflict") {
+    return first;
+  }
+  const sessionId = sessionStore.getSnapshot().sessionId;
+  if (sessionId === null) {
+    return first;
+  }
+  const reloaded = await sessionStore.loadSession(sessionId);
+  if (!reloaded.ok) {
+    return { ok: false, error: reloaded.error };
+  }
+  if (reloaded.data.status === "complete" || reloaded.data.status === "abandoned") {
+    return first;
+  }
+  return writeState("paired", currentState);
+}
+
+/**
+ * The status is read inside the state queue, at the version the write expects,
+ * so a session that is complete, already abandoned or no longer the one in the
+ * store is never written. Returns null when nothing was written.
+ */
+function writeAbandoned(sessionId: string, currentState: Json): Promise<WriteResult | null> {
+  return enqueueState(async () => {
+    const session = sessionStore.getSnapshot();
+    if (
+      session.sessionId !== sessionId ||
+      session.status === null ||
+      session.status === "complete" ||
+      session.status === "abandoned"
+    ) {
+      return null;
+    }
+    return sessionStore.setState("abandoned", currentState);
+  });
+}
+
+/** Never throws. Reloads once and writes again on a version conflict; logs other failures. */
+async function writeAbandonedRetryOnce(currentState: Json): Promise<void> {
+  try {
+    const sessionId = sessionStore.getSnapshot().sessionId;
+    if (sessionId === null) {
+      return;
+    }
+    const first = await writeAbandoned(sessionId, currentState);
+    if (first === null || first.ok) {
+      return;
+    }
+    if (first.error.kind !== "version-conflict") {
+      console.error(first.error);
+      return;
+    }
+    const reloaded = await sessionStore.loadSession(sessionId);
+    if (!reloaded.ok) {
+      console.error(reloaded.error);
+      return;
+    }
+    const second = await writeAbandoned(sessionId, currentState);
+    if (second !== null && !second.ok) {
+      console.error(second.error);
+    }
+  } catch (error) {
+    console.error(error);
+  }
 }
 
 function rememberTrial(trial: ActiveTrial): void {
@@ -380,21 +491,42 @@ function appendVoidedHistory(state: RespondedState): void {
 
 /**
  * Plain ended screen: start controls available, session cleared from the
- * address bar so a refresh does not reopen it. No further writes.
+ * address bar so a refresh does not reopen it. Stays synchronous for its
+ * callers: an open session is closed in the background, after any earlier
+ * close, and the store is reset after that close only if it still holds the
+ * same session. start() and backToStart() await endedSessionClose, so no new
+ * session can enter the store while a close runs.
  */
-function showSessionEndedScreen(message: string, detail?: unknown): void {
+function showSessionEndedScreen(message: string, reason: string, error?: unknown): void {
   if (setupStopped) {
     return;
   }
+  clearCountdown();
   stopPoll();
   leaveChannel();
   stopVisibilityTracking();
+  releaseScreenAwake();
   activeTrial = null;
   clearSessionIdFromUrl();
-  sessionStore.reset();
-  if (detail !== undefined) {
-    console.error(detail);
-  }
+  reportClientError(message, reason, error);
+  const heldSessionId = sessionStore.getSnapshot().sessionId;
+  const heldRun = run;
+  const previousClose = endedSessionClose;
+  const close = (async () => {
+    if (previousClose !== null) {
+      await previousClose;
+    }
+    await closeOpenSession(reason, heldRun);
+    if (sessionStore.getSnapshot().sessionId === heldSessionId) {
+      sessionStore.reset();
+    }
+  })();
+  endedSessionClose = close;
+  void close.finally(() => {
+    if (endedSessionClose === close) {
+      endedSessionClose = null;
+    }
+  });
   patch({
     phase: "error",
     sessionId: null,
@@ -408,10 +540,12 @@ function showSessionEndedScreen(message: string, detail?: unknown): void {
     history: [],
     historyLoadFailed: false,
     errorMessage: message,
-    errorDetail: detail === undefined ? null : detailText(detail),
+    errorDetail: errorDetailText(reason, error),
     result: null,
     notSureCount: 0,
     correction: null,
+    countdownValue: null,
+    stopReason: null,
   });
 }
 
@@ -453,16 +587,57 @@ function patch(partial: Partial<TestSnapshot>): void {
   });
 }
 
-function fail(message: string, detail?: unknown): void {
-  stopVisibilityTracking();
-  if (detail !== undefined) {
-    console.error(detail);
+function errorDetailText(reason: string, error: unknown): string {
+  return error === undefined ? reason : `${reason}: ${detailText(error)}`;
+}
+
+/**
+ * Logs the failure and, when a session is held, appends client_error to it
+ * without waiting. appendEvent reads the session id before its first await.
+ */
+function reportClientError(message: string, reason: string, error: unknown): void {
+  console.error(reason, error ?? "");
+  if (sessionStore.getSnapshot().sessionId === null) {
+    return;
   }
+  void sessionStore
+    .appendEvent({
+      type: "client_error",
+      payload: {
+        reason,
+        message: error === undefined ? message : detailText(error),
+      },
+    })
+    .then(
+      (logged) => {
+        if (!logged.ok) {
+          console.error(logged.error);
+        }
+      },
+      (appendError: unknown) => {
+        console.error(appendError);
+      },
+    );
+}
+
+function fail(message: string, reason: string, error?: unknown): void {
+  clearCountdown();
+  stopVisibilityTracking();
+  releaseScreenAwake();
+  reportClientError(message, reason, error);
   patch({
     phase: "error",
     errorMessage: message,
-    errorDetail: detail === undefined ? null : detailText(detail),
+    errorDetail: errorDetailText(reason, error),
+    countdownValue: null,
   });
+}
+
+function clearCountdown(): void {
+  if (countdownTimer !== null) {
+    clearTimeout(countdownTimer);
+    countdownTimer = null;
+  }
 }
 
 export function subscribe(listener: () => void): () => void {
@@ -526,7 +701,12 @@ function evaluateSetup(
 
 export function checkSetupNow(): void {
   const phase = cachedSnapshot.phase;
-  if (phase !== "ready" && phase !== "presenting" && phase !== "awaiting_response") {
+  if (
+    phase !== "ready" &&
+    phase !== "countdown" &&
+    phase !== "presenting" &&
+    phase !== "awaiting_response"
+  ) {
     return;
   }
   const outcome = evaluateSetup(cachedSnapshot.format);
@@ -556,6 +736,7 @@ async function stopForSetup(reason: "calibration" | "zoom" | "window"): Promise<
     return;
   }
   setupStopped = true;
+  clearCountdown();
   visibilityGeneration += 1;
   const currentRun = run;
   if (currentRun !== null) {
@@ -566,27 +747,171 @@ async function stopForSetup(reason: "calibration" | "zoom" | "window"): Promise<
     if (!eventResult.ok) {
       console.error(eventResult.error);
     }
-    const abandoned = await writeState("abandoned", readyState(currentRun));
-    if (!abandoned.ok) {
-      console.error(abandoned.error);
-    }
+    await writeAbandonedRetryOnce(readyState(currentRun));
   }
   stopPoll();
   leaveChannel();
   stopVisibilityTracking();
+  releaseScreenAwake();
   activeTrial = null;
   clearSessionIdFromUrl();
   patch({
     phase: "stopped",
     sessionId: null,
-    errorMessage: MSG_SETUP_CHANGED,
-    errorDetail: null,
+    errorMessage: STOPPED_HEADING,
+    errorDetail: `stopped_for_setup: ${reason}`,
     currentTrialIndex: null,
     currentStepIndex: null,
     currentTarget: null,
     currentLeftFlanker: null,
     currentRightFlanker: null,
+    countdownValue: null,
+    stopReason: reason,
   });
+}
+
+/**
+ * Closes the held session as abandoned unless it is complete or already
+ * abandoned, then tears down the poll, channel, countdown, wake lock and
+ * ?session=. Never throws.
+ */
+async function closeOpenSession(
+  reason: string,
+  runForState: RunContext | null = run,
+): Promise<void> {
+  try {
+    const session = sessionStore.getSnapshot();
+    if (
+      session.sessionId !== null &&
+      session.status !== null &&
+      session.status !== "complete" &&
+      session.status !== "abandoned"
+    ) {
+      const logged = await sessionStore.appendEvent({
+        type: "session_closed",
+        payload: { reason },
+      });
+      if (!logged.ok) {
+        console.error(logged.error);
+      }
+      await writeAbandonedRetryOnce(readyState(runForState));
+    }
+  } catch (error) {
+    console.error(error);
+  }
+  try {
+    stopPoll();
+    leaveChannel();
+    clearCountdown();
+    releaseScreenAwake();
+    clearSessionIdFromUrl();
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+/**
+ * Called once per page load when ?session= is valid but calibration is not.
+ * Loads that session and closes it if it is still open.
+ */
+export async function closeSessionById(sessionId: string): Promise<void> {
+  if (!isSessionUuid(sessionId)) {
+    return;
+  }
+  if (cachedSnapshot.sessionId !== null || cachedSnapshot.phase !== "idle") {
+    return;
+  }
+  try {
+    sessionStore.reset();
+    const loaded = await sessionStore.loadSession(sessionId);
+    if (!loaded.ok) {
+      console.error(loaded.error);
+      return;
+    }
+    if (loaded.data.status === "complete" || loaded.data.status === "abandoned") {
+      return;
+    }
+    const loopState = parseLoopState(loaded.data.currentState);
+    await closeOpenSession(
+      "calibration_invalid_on_reload",
+      loopState === null ? null : loopState.run,
+    );
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+/**
+ * The session row does not hold the distance the letters are drawn at.
+ * Logs, abandons the session and shows the setup failure.
+ */
+async function abandonForDistanceMismatch(
+  confirmedMm: number | null,
+  storedMm: number | null,
+): Promise<void> {
+  if (distanceAbandonInFlight) {
+    return;
+  }
+  distanceAbandonInFlight = true;
+  clearCountdown();
+  stopPoll();
+  leaveChannel();
+  try {
+    const mismatchEvent = await sessionStore.appendEvent({
+      type: "distance_mismatch",
+      payload: {
+        confirmed_mm: confirmedMm,
+        stored_mm: storedMm,
+      },
+    });
+    if (!mismatchEvent.ok) {
+      console.error(mismatchEvent.error);
+    }
+    await writeAbandonedRetryOnce(readyState(run));
+    fail(
+      MSG_SETUP_FAILED,
+      `distance_mismatch confirmed ${String(confirmedMm)} stored ${String(storedMm)}`,
+    );
+  } finally {
+    distanceAbandonInFlight = false;
+  }
+}
+
+function startCountdown(): void {
+  if (cachedSnapshot.phase !== "ready" || countdownTimer !== null) {
+    return;
+  }
+  let position = 0;
+  patch({ phase: "countdown", countdownValue: COUNTDOWN_NUMBERS[0] ?? null });
+  const step = (): void => {
+    position += 1;
+    const next = COUNTDOWN_NUMBERS[position];
+    if (next !== undefined) {
+      patch({ countdownValue: next });
+      countdownTimer = setTimeout(step, COUNTDOWN_STEP_MS);
+      return;
+    }
+    countdownTimer = null;
+    patch({ countdownValue: null });
+    finishCountdown();
+  };
+  countdownTimer = setTimeout(step, COUNTDOWN_STEP_MS);
+}
+
+function finishCountdown(): void {
+  if (disposed || setupStopped || cachedSnapshot.phase !== "countdown") {
+    return;
+  }
+  const outcome = afterCountdown(evaluateSetup(cachedSnapshot.format));
+  if (outcome.kind === "begin") {
+    void beginTrials();
+    return;
+  }
+  if (outcome.kind === "stop-setup") {
+    void stopForSetup(outcome.reason);
+    return;
+  }
+  fail(MSG_SETUP_FAILED, "after_countdown_setup_null");
 }
 
 function completedTrialFromAnswered(row: AnsweredTrial): CompletedTrial {
@@ -686,7 +1011,7 @@ async function persistHiddenVoid(trial: ActiveTrial): Promise<void> {
     const latestRun = run;
     const latestPresentationId = trial.presentationId;
     if (latestRun === null || latestPresentationId === null || disposed || setupStopped) {
-      fail(MSG_CONNECTION, stateResult.error);
+      fail(MSG_SESSION_CANNOT_CONTINUE, "void_state_conflict_unrecoverable", stateResult.error);
       return;
     }
     const retry = await writeState(
@@ -699,13 +1024,13 @@ async function persistHiddenVoid(trial: ActiveTrial): Promise<void> {
       }),
     );
     if (!retry.ok) {
-      fail(MSG_CONNECTION, retry.error);
+      fail(MSG_CONNECTION, "void_state_retry_failed", retry.error);
       return;
     }
     voidStateSaved.add(latestPresentationId);
     return;
   }
-  fail(MSG_CONNECTION, stateResult.error);
+  fail(MSG_CONNECTION, "void_state_write_failed", stateResult.error);
 }
 
 async function restoreFreshTrialIfNeeded(): Promise<void> {
@@ -731,7 +1056,7 @@ async function restoreFreshTrialIfNeeded(): Promise<void> {
     }),
   );
   if (!rewritten.ok) {
-    fail(MSG_CONNECTION, rewritten.error);
+    fail(MSG_CONNECTION, "restore_fresh_write_failed", rewritten.error);
     return;
   }
   if (channel !== null) {
@@ -746,12 +1071,13 @@ async function finishRun(): Promise<void> {
   const currentRun = run;
   const currentStaircase = staircase;
   if (currentRun === null || currentStaircase === null || currentStaircase.status !== "finished") {
-    fail(MSG_CONNECTION);
+    fail(MSG_SESSION_CANNOT_CONTINUE, "finish_staircase_not_finished");
     return;
   }
   const distanceMm = cachedSnapshot.distanceMm;
   if (distanceMm === null) {
-    fail(MSG_SESSION_CANNOT_CONTINUE);
+    await closeOpenSession("resume_distance");
+    showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE, "finish distance null");
     return;
   }
   const result = currentStaircase.result;
@@ -762,7 +1088,7 @@ async function finishRun(): Promise<void> {
     completeState(letterCount, { run: currentRun, result }),
   );
   if (!done.ok) {
-    fail(MSG_CONNECTION, done.error);
+    fail(MSG_CONNECTION, "finish_complete_write_failed", done.error);
     return;
   }
   if (disposed || setupStopped) {
@@ -806,6 +1132,7 @@ async function finishRun(): Promise<void> {
   }
   activeTrial = null;
   stopVisibilityTracking();
+  releaseScreenAwake();
   patch({
     phase: "complete",
     result,
@@ -832,7 +1159,7 @@ async function captureVoidedAnswerIfResponded(): Promise<void> {
     return;
   }
   if (loaded.data.status === "abandoned") {
-    showSessionEndedScreen(MSG_SESSION_ENDED);
+    showSessionEndedScreen(MSG_SESSION_ENDED, "capture_void_session_abandoned");
     return;
   }
   const state = parseLoopState(loaded.data.currentState);
@@ -869,7 +1196,7 @@ async function tryAdvanceFromResponded(): Promise<void> {
       return;
     }
     if (loaded.data.status === "abandoned") {
-      showSessionEndedScreen(MSG_SESSION_ENDED);
+      showSessionEndedScreen(MSG_SESSION_ENDED, "advance_session_abandoned");
       return;
     }
     if (
@@ -963,9 +1290,12 @@ async function onSessionNudgeOrPoll(): Promise<void> {
   if (!loaded.ok || disposed || setupStopped) {
     return;
   }
+  if (cachedSnapshot.sessionId !== sessionId) {
+    return;
+  }
 
   if (loaded.data.status === "abandoned") {
-    showSessionEndedScreen(MSG_SESSION_ENDED);
+    showSessionEndedScreen(MSG_SESSION_ENDED, "poll_session_abandoned");
     return;
   }
 
@@ -975,6 +1305,43 @@ async function onSessionNudgeOrPoll(): Promise<void> {
     loaded.data.status === "paired"
   ) {
     patch({ phase: "ready", errorMessage: null, errorDetail: null });
+  }
+
+  const loopState = parseLoopState(loaded.data.currentState);
+  const decision = autoStartDecision({
+    uiPhase: cachedSnapshot.phase,
+    sessionStatus: loaded.data.status,
+    positionConfirmed:
+      loopState !== null && loopState.phase === "ready" && loopState.positionConfirmed === true,
+    storedDistanceMm: loaded.data.distanceMmRequested,
+    snapshotDistanceMm: cachedSnapshot.distanceMm,
+    setup: evaluateSetup(cachedSnapshot.format),
+  });
+  if (decision.kind === "stop-distance") {
+    await abandonForDistanceMismatch(
+      cachedSnapshot.distanceMm,
+      loaded.data.distanceMmRequested,
+    );
+    return;
+  }
+  if (decision.kind === "stop-setup") {
+    await stopForSetup(decision.reason);
+    return;
+  }
+  if (decision.kind === "start-countdown") {
+    // Not awaited: the phase must turn "countdown" in this tick so a concurrent nudge waits.
+    void sessionStore
+      .appendEvent({
+        type: "position_confirmed",
+        payload: { distance_mm: cachedSnapshot.distanceMm },
+      })
+      .then((logged) => {
+        if (!logged.ok) {
+          console.error(logged.error);
+        }
+      });
+    startCountdown();
+    return;
   }
 
   await tryAdvanceFromResponded();
@@ -1034,7 +1401,7 @@ async function interruptActiveLetter(): Promise<void> {
     return;
   }
   if (!commitVoid(trial)) {
-    fail(MSG_CONNECTION);
+    fail(MSG_SESSION_CANNOT_CONTINUE, "void_commit_failed");
     return;
   }
   await persistHiddenVoid(trial);
@@ -1087,7 +1454,7 @@ async function presentNextLetter(): Promise<void> {
     currentRun === null ||
     calibration === null
   ) {
-    fail(MSG_SCREEN_CANNOT_SHOW);
+    fail(MSG_SCREEN_CANNOT_SHOW_AT_3M, "staircase_not_running");
     return;
   }
 
@@ -1128,6 +1495,10 @@ async function presentNextLetter(): Promise<void> {
     errorMessage: null,
     errorDetail: null,
   });
+  if (document.visibilityState === "hidden") {
+    // No visibilitychange fires for a letter put up in a hidden tab; commitVoid runs before the first await.
+    void interruptActiveLetter();
+  }
 }
 
 /**
@@ -1153,7 +1524,7 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
     return;
   }
   if (measurement.inkBounds === null) {
-    fail("The letter could not be measured on this screen.");
+    fail(MSG_LETTER_NOT_MEASURED, "presentation_measure_failed");
     return;
   }
 
@@ -1218,6 +1589,10 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
       payload.actual_stroke_width_device_px = measurement.strokeWidthDevicePx;
     }
 
+    if (document.visibilityState === "hidden" && !commitVoid(trial)) {
+      fail(MSG_SESSION_CANNOT_CONTINUE, "void_commit_failed");
+      return;
+    }
     trial.recorded = true;
     const recorded = await sessionStore.recordPresentation(payload);
     if (!recorded.ok) {
@@ -1226,7 +1601,7 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
         skippingDuplicateTrial = true;
         if (!commitVoid(trial)) {
           skippingDuplicateTrial = false;
-          fail(MSG_CONNECTION, recorded.error);
+          fail(MSG_CONNECTION, "duplicate_trial_void_failed", recorded.error);
           return;
         }
         if (nextTrialIndex <= trial.trialIndex) {
@@ -1240,7 +1615,7 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
         return;
       }
       skippingDuplicateTrial = false;
-      fail(MSG_CONNECTION, recorded.error);
+      fail(MSG_CONNECTION, "presentation_record_failed", recorded.error);
       return;
     }
     skippingDuplicateTrial = false;
@@ -1278,13 +1653,13 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
       },
     });
     if (!eventResult.ok) {
-      fail(MSG_CONNECTION, eventResult.error);
+      fail(MSG_CONNECTION, "choices_offered_failed", eventResult.error);
       return;
     }
 
     const currentRun = run;
     if (currentRun === null) {
-      fail(MSG_CONNECTION);
+      fail(MSG_SESSION_CANNOT_CONTINUE, "presentation_run_missing");
       return;
     }
     const stateResult = await writeState(
@@ -1297,7 +1672,7 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
       }),
     );
     if (!stateResult.ok) {
-      fail(MSG_CONNECTION, stateResult.error);
+      fail(MSG_CONNECTION, "awaiting_response_write_failed", stateResult.error);
       return;
     }
 
@@ -1365,6 +1740,41 @@ export function prepareTestAgain(): void {
   });
 }
 
+/**
+ * Closes the held session unless it is complete or already abandoned, then
+ * returns to the start screen holding nothing from it: same module state and
+ * snapshot as a first visit.
+ */
+export async function backToStart(): Promise<void> {
+  if (backInFlight) {
+    return;
+  }
+  backInFlight = true;
+  try {
+    clearCountdown();
+    stopPoll();
+    leaveChannel();
+    stopVisibilityTracking();
+    if (endedSessionClose !== null) {
+      await endedSessionClose;
+    }
+    await closeOpenSession("back_to_start");
+    resumeGeneration += 1;
+    setupStopped = false;
+    releaseScreenAwake();
+    activeTrial = null;
+    history = [];
+    calibration = null;
+    resetRunMemory();
+    rememberedFinishedTest = null;
+    finishedScoredLetterCount = null;
+    sessionStore.reset();
+    emit({ ...SERVER_SNAPSHOT });
+  } finally {
+    backInFlight = false;
+  }
+}
+
 async function handOverFinishedTest(nextSessionId: string): Promise<void> {
   const prior = rememberedFinishedTest;
   if (prior === null) {
@@ -1397,7 +1807,7 @@ async function handOverFinishedTest(nextSessionId: string): Promise<void> {
 }
 
 export async function start(
-  distanceMm: number,
+  distance: DistanceConfirmation,
   nextCalibration: Calibration,
   format: SessionFormat,
   viewportWidthCssPx: number,
@@ -1412,6 +1822,22 @@ export async function start(
   }
 
   startInFlight = true;
+  const generation = resumeGeneration;
+  if (endedSessionClose !== null) {
+    await endedSessionClose;
+    if (generation !== resumeGeneration) {
+      startInFlight = false;
+      return;
+    }
+  }
+  if (cachedSnapshot.sessionId !== null || sessionStore.getSnapshot().sessionId !== null) {
+    await closeOpenSession("new_start");
+    if (generation !== resumeGeneration) {
+      startInFlight = false;
+      return;
+    }
+  }
+  sessionStore.reset();
   disposed = false;
   setupStopped = false;
   leaveChannel();
@@ -1423,6 +1849,21 @@ export async function start(
   resetRunMemory();
 
   try {
+    const gate = checkDistanceBeforeStart(distance);
+    if (!gate.ok) {
+      if (gate.reason === "not-confirmed") {
+        fail(MSG_DISTANCE_NOT_CONFIRMED, "start_distance_not_confirmed");
+      } else {
+        fail(MSG_SETUP_FAILED, `start_distance_not_allowed ${String(distance.distanceMm)}`);
+      }
+      return;
+    }
+    const distanceMm = gate.distanceMm;
+    if (setupProbe !== null && zoomBlocksStart(setupProbe().zoomState)) {
+      fail(MSG_ZOOM_AT_START, "start_zoom_not_default");
+      return;
+    }
+
     let levels: ReturnType<typeof computeTestLevels>;
     try {
       levels = computeTestLevels({
@@ -1437,11 +1878,11 @@ export async function start(
         format,
       });
     } catch (error) {
-      fail(MSG_SCREEN_CANNOT_SHOW, error);
+      fail(MSG_SCREEN_CANNOT_SHOW_AT_3M, "start_levels_failed", error);
       return;
     }
     if (levels.stepIndices.length === 0) {
-      fail(MSG_SCREEN_CANNOT_SHOW);
+      fail(MSG_SCREEN_CANNOT_SHOW_AT_3M, "start_no_drawable_levels");
       return;
     }
 
@@ -1456,11 +1897,11 @@ export async function start(
     try {
       started = startStaircase(nextRun.stepIndices);
     } catch (error) {
-      fail(MSG_SCREEN_CANNOT_SHOW, error);
+      fail(MSG_SCREEN_CANNOT_SHOW_AT_3M, "start_staircase_failed", error);
       return;
     }
     if (started.status !== "running") {
-      fail(MSG_SCREEN_CANNOT_SHOW);
+      fail(MSG_SCREEN_CANNOT_SHOW_AT_3M, "start_staircase_not_running");
       return;
     }
     run = nextRun;
@@ -1489,32 +1930,46 @@ export async function start(
       errorDetail: null,
       result: null,
       notSureCount: 0,
+      stopReason: null,
     });
 
-    sessionStore.reset();
     const created = await sessionStore.createSession({
       distanceMmRequested: distanceMm,
       clientBuild: CLIENT_BUILD,
     });
     if (!created.ok) {
-      fail(MSG_CONNECTION, created.error);
+      fail(MSG_CONNECTION, "create_session_failed", created.error);
+      return;
+    }
+    if (!storedDistanceMatches(distanceMm, created.data.distanceMmRequested)) {
+      await abandonForDistanceMismatch(distanceMm, created.data.distanceMmRequested);
       return;
     }
 
     const attached = await sessionStore.attachCalibration(nextCalibration);
     if (!attached.ok) {
-      fail(MSG_CONNECTION, attached.error);
+      fail(MSG_CONNECTION, "attach_calibration_failed", attached.error);
       return;
     }
 
     const ready = await writeState("created", readyState(nextRun));
     if (!ready.ok) {
-      fail(MSG_CONNECTION, ready.error);
+      fail(MSG_CONNECTION, "start_state_write_failed", ready.error);
+      return;
+    }
+
+    const confirmedEvent = await sessionStore.appendEvent({
+      type: "distance_confirmed",
+      payload: { distance_mm: distanceMm },
+    });
+    if (!confirmedEvent.ok) {
+      fail(MSG_CONNECTION, "distance_confirmed_event_failed", confirmedEvent.error);
       return;
     }
 
     const startedPayload: { [key: string]: Json } = {
       correction,
+      distance_mm: distanceMm,
       step_indices: [...nextRun.stepIndices],
       finest_limited_by: nextRun.finestLimitedBy,
       coarsest_limited_by: nextRun.coarsestLimitedBy,
@@ -1528,7 +1983,7 @@ export async function start(
       payload: startedPayload,
     });
     if (!startedEvent.ok) {
-      fail(MSG_CONNECTION, startedEvent.error);
+      fail(MSG_CONNECTION, "test_started_event_failed", startedEvent.error);
       return;
     }
 
@@ -1543,6 +1998,7 @@ export async function start(
       remoteUrl: pairing.remoteUrl,
       qrDataUrl: pairing.qrDataUrl,
     });
+    requestScreenAwake();
   } finally {
     startInFlight = false;
   }
@@ -1619,13 +2075,14 @@ export async function resume(
     result: null,
     notSureCount: 0,
     correction: null,
+    stopReason: null,
   });
 
   try {
     sessionStore.reset();
     const loaded = await sessionStore.loadSession(sessionId);
     if (!loaded.ok) {
-      fail(MSG_CONNECTION, loaded.error);
+      fail(MSG_CONNECTION, "resume_load_failed", loaded.error);
       return;
     }
     if (disposed || generation !== resumeGeneration) {
@@ -1635,7 +2092,7 @@ export async function resume(
     const view = loaded.data;
 
     if (view.status === "abandoned") {
-      showSessionEndedScreen(MSG_SESSION_ENDED);
+      showSessionEndedScreen(MSG_SESSION_ENDED, "resume_status_abandoned");
       return;
     }
 
@@ -1645,20 +2102,24 @@ export async function resume(
       view.status !== "complete" &&
       view.status !== "running"
     ) {
-      showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE);
+      showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE, `resume_status_${String(view.status)}`);
       return;
     }
 
+    const loopState = parseLoopState(view.currentState);
     const distanceMm = view.distanceMmRequested;
-    if (distanceMm === null) {
-      fail(MSG_SESSION_CANNOT_CONTINUE);
+    if (distanceMm === null || !ALLOWED_TEST_DISTANCES_MM.includes(distanceMm)) {
+      await closeOpenSession("resume_distance", loopState === null ? null : loopState.run);
+      if (disposed || generation !== resumeGeneration) {
+        return;
+      }
+      showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE, `resume distance ${String(distanceMm)}`);
       return;
     }
 
     const stateFormat = formatFromCurrentState(view.currentState);
     const format: SessionFormat = stateFormat ?? "flanked-triplet";
     const formatSource: FormatSource = stateFormat !== null ? "state" : "resumed-default";
-    const loopState = parseLoopState(view.currentState);
 
     setSessionIdInUrl(view.id);
     const pairing = await buildRemotePairing(view.id);
@@ -1668,12 +2129,26 @@ export async function resume(
 
     if (view.status === "created" || view.status === "paired") {
       if (loopState === null || loopState.run === null) {
-        showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE);
+        showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE, "resume_paused_state_missing");
         return;
       }
       if (!adoptPausedRun(loopState.run)) {
-        showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE);
+        showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE, "resume_paused_run_invalid");
         return;
+      }
+      const clearPosition =
+        view.status === "paired" &&
+        loopState.phase === "ready" &&
+        loopState.positionConfirmed === true;
+      if (clearPosition) {
+        const cleared = await writePairedRetryOnce(readyState(loopState.run));
+        if (!cleared.ok) {
+          fail(MSG_CONNECTION, "resume_clear_tap_failed", cleared.error);
+          return;
+        }
+        if (disposed || generation !== resumeGeneration || setupStopped) {
+          return;
+        }
       }
       patch({
         phase: view.status === "created" ? "waiting_for_phone" : "ready",
@@ -1687,6 +2162,7 @@ export async function resume(
         errorMessage: null,
         errorDetail: null,
       });
+      requestScreenAwake();
       return;
     }
 
@@ -1697,7 +2173,7 @@ export async function resume(
         loopState.run === null ||
         loopState.result === null
       ) {
-        showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE);
+        showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE, "resume_complete_state_invalid");
         return;
       }
       finishedScoredLetterCount = loopState.trialsCompleted;
@@ -1713,6 +2189,7 @@ export async function resume(
         console.error(rebuilt.error);
       }
       history = withVoidedFlags(rebuilt.history, run.voidedTrialIndices);
+      releaseScreenAwake();
       patch({
         phase: "complete",
         format,
@@ -1734,7 +2211,7 @@ export async function resume(
 
     // view.status === "running"
     if (loopState === null || loopState.run === null) {
-      showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE);
+      showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE, "resume_running_state_missing");
       return;
     }
     const savedRun = loopState.run;
@@ -1743,7 +2220,11 @@ export async function resume(
       return;
     }
     if (rebuilt.error !== null) {
-      showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE, rebuilt.error);
+      showSessionEndedScreen(
+        MSG_SESSION_CANNOT_CONTINUE,
+        "resume_history_load_failed",
+        rebuilt.error,
+      );
       return;
     }
 
@@ -1764,7 +2245,11 @@ export async function resume(
       highestPresentedTrialIndex,
     });
     if (replay.status === "inconsistent") {
-      showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE, replay.reason);
+      showSessionEndedScreen(
+        MSG_SESSION_CANNOT_CONTINUE,
+        "resume_replay_inconsistent",
+        replay.reason,
+      );
       return;
     }
 
@@ -1812,13 +2297,12 @@ export async function resume(
       errorDetail: null,
     });
 
-    const setup = evaluateSetup("flanked-triplet", {
+    const setup = evaluateSetup(format, {
       viewportWidthCssPx,
       viewportHeightCssPx,
     });
     if (setup === null) {
-      console.error("setup probe is not registered");
-      showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE);
+      showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE, "resume_setup_probe_missing");
       return;
     }
     if (setup !== "ok") {
@@ -1836,32 +2320,43 @@ export async function resume(
 
     const currentRun = run;
     if (currentRun === null) {
-      showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE);
+      showSessionEndedScreen(MSG_SESSION_CANNOT_CONTINUE, "resume_run_missing");
       return;
     }
-    const ready = await writeState("running", readyState(currentRun));
-    if (!ready.ok) {
-      fail(MSG_CONNECTION, ready.error);
+    // The customer may be at the computer after a reload: no letter until a new tap and countdown.
+    const paired = await writePairedRetryOnce(readyState(currentRun));
+    if (!paired.ok) {
+      fail(MSG_CONNECTION, "resume_position_reset_write_failed", paired.error);
       return;
     }
     if (disposed || generation !== resumeGeneration || setupStopped) {
       return;
     }
-    if (channel !== null) {
-      await channel.sendNudge("running");
+    const resetEvent = await sessionStore.appendEvent({
+      type: "position_reset",
+      payload: { reason: "reload" },
+    });
+    if (!resetEvent.ok) {
+      console.error(resetEvent.error);
     }
-
-    await presentNextLetter();
+    if (disposed || generation !== resumeGeneration || setupStopped) {
+      return;
+    }
+    patch({ phase: "ready", countdownValue: null });
+    requestScreenAwake();
+    if (channel !== null) {
+      await channel.sendNudge("paired");
+    }
   } finally {
     resumeInFlight = false;
   }
 }
 
-export async function beginTrials(): Promise<void> {
+async function beginTrials(): Promise<void> {
   if (beginInFlight || setupStopped) {
     return;
   }
-  if (cachedSnapshot.phase !== "ready") {
+  if (cachedSnapshot.phase !== "countdown") {
     return;
   }
   const currentRun = run;
@@ -1871,7 +2366,7 @@ export async function beginTrials(): Promise<void> {
     staircase === null ||
     staircase.status !== "running"
   ) {
-    fail(MSG_SCREEN_CANNOT_SHOW);
+    fail(MSG_SCREEN_CANNOT_SHOW_AT_3M, "begin_staircase_not_running");
     return;
   }
 
@@ -1879,13 +2374,13 @@ export async function beginTrials(): Promise<void> {
   try {
     const session = sessionStore.getSnapshot();
     if (session.status !== "paired" && session.status !== "running") {
-      fail("Phone is not paired yet.");
+      fail(MSG_SETUP_FAILED, "begin_not_paired");
       return;
     }
     if (session.status === "paired") {
       const running = await writeState("running", readyState(currentRun));
       if (!running.ok) {
-        fail(MSG_CONNECTION, running.error);
+        fail(MSG_CONNECTION, "begin_running_write_failed", running.error);
         return;
       }
       if (channel !== null) {
@@ -1902,12 +2397,15 @@ export function dispose(): void {
   disposed = true;
   setupStopped = false;
   resumeGeneration += 1;
+  clearCountdown();
   stopPoll();
   leaveChannel();
   stopVisibilityTracking();
+  releaseScreenAwake();
   startInFlight = false;
   resumeInFlight = false;
   beginInFlight = false;
+  distanceAbandonInFlight = false;
   measureInFlight = false;
   advanceInFlight = false;
   activeTrial = null;

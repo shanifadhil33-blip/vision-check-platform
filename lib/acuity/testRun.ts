@@ -4,6 +4,7 @@
  */
 
 import type { RunContext, RunResult } from "@/lib/session/loopState";
+import { DEFAULT_TEST_DISTANCE_MM } from "./distanceSetup";
 import { customerLabelForStep } from "./resultLabel";
 import { isResponseCorrect } from "./isResponseCorrect";
 import type { SloanLetter } from "./sloan";
@@ -151,6 +152,8 @@ export function notSureCount(
 
 export type TestQualityPayload = {
   distance_requested_mm: number;
+  distance_recommended_mm: number;
+  distance_chosen_mm: number;
   renderable_finest_logmar: number;
   renderable_coarsest_logmar: number;
   finest_limited_by: RunContext["finestLimitedBy"];
@@ -177,6 +180,8 @@ export function testQualityPayload(input: {
 
   const payload: TestQualityPayload = {
     distance_requested_mm: input.distanceMm,
+    distance_recommended_mm: DEFAULT_TEST_DISTANCE_MM,
+    distance_chosen_mm: input.distanceMm,
     renderable_finest_logmar: finestStepIndex / 10,
     renderable_coarsest_logmar: coarsestStepIndex / 10,
     finest_limited_by: input.run.finestLimitedBy,

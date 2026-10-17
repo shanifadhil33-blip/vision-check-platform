@@ -4,6 +4,7 @@ import {
   completeState,
   parseLoopState,
   parseRunContext,
+  readyState,
   respondedState,
   type RunContext,
 } from "./loopState";
@@ -134,6 +135,41 @@ describe("parseLoopState", () => {
       responseLetter: "C",
       run: RUN,
     });
+  });
+});
+
+describe("ready positionConfirmed", () => {
+  it("L1 round-trips a ready state with positionConfirmed true", () => {
+    const json = readyState(RUN, { positionConfirmed: true });
+    expect(json).toEqual({ phase: "ready", positionConfirmed: true, run: RUN });
+    expect(parseLoopState(json)).toEqual({
+      phase: "ready",
+      run: RUN,
+      positionConfirmed: true,
+    });
+  });
+
+  it("L2 parses a ready state without the key as not confirmed and writes it without the key", () => {
+    const json = readyState(RUN);
+    expect(json).not.toHaveProperty("positionConfirmed");
+    const parsed = parseLoopState({ phase: "ready", run: RUN });
+    expect(parsed).not.toBeNull();
+    expect(parsed?.phase).toBe("ready");
+    if (parsed === null || parsed.phase !== "ready") {
+      return;
+    }
+    expect(parsed.positionConfirmed).toBeUndefined();
+    expect(parsed.run).toEqual(RUN);
+  });
+
+  it("L3 rejects positionConfirmed \"yes\"", () => {
+    expect(parseLoopState({ phase: "ready", run: RUN, positionConfirmed: "yes" })).toBeNull();
+  });
+
+  it("L4 writes positionConfirmed false without the key", () => {
+    const json = readyState(RUN, { positionConfirmed: false });
+    expect(json).not.toHaveProperty("positionConfirmed");
+    expect(json).toEqual({ phase: "ready", run: RUN });
   });
 });
 

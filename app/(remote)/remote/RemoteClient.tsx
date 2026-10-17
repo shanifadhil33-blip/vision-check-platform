@@ -1,23 +1,40 @@
 "use client";
 
 import { useEffect, useSyncExternalStore } from "react";
+import {
+  PHONE_AT_MARK_BUTTON,
+  PHONE_CONNECTED,
+  PHONE_CONNECTING,
+  PHONE_GO_TO_MARK,
+  PHONE_LOOK_AT_SCREEN,
+  PHONE_POSITION_FAILED,
+} from "@/lib/acuity/autoStart";
+import {
+  PHONE_LINK_INCOMPLETE,
+  PHONE_POSITION_RESET,
+  PHONE_RECONNECTING,
+  PHONE_SENDING,
+  PHONE_SESSION_ENDED,
+  PHONE_STILL_WAITING,
+  PHONE_TRY_AGAIN,
+} from "@/lib/acuity/flowWording";
 import type { SloanLetter } from "@/lib/acuity/sloan";
 import { useSessionStore } from "@/lib/session/useSessionStore";
 import {
   answer,
   bootstrap,
-  connect,
+  confirmPosition,
   disposeRemote,
   getServerSnapshot,
   getSnapshot,
   retryFailed,
   subscribe,
   watchRemote,
+  type RemoteSnapshot,
 } from "./remoteController";
 
 type Props = {
   sessionId: string | null;
-  follow?: boolean;
 };
 
 function choiceButtonClass(
@@ -45,9 +62,16 @@ function choiceButtonClass(
   return `${base} bg-neutral-100 text-neutral-900 hover:bg-neutral-200 active:bg-neutral-300`;
 }
 
-export default function RemoteClient({ sessionId, follow = false }: Props) {
+function StillWaitingLine({ show }: { show: boolean }) {
+  return (
+    <p className="min-h-6 text-neutral-400" aria-live="polite">
+      {show ? PHONE_STILL_WAITING : ""}
+    </p>
+  );
+}
+
+export default function RemoteClient({ sessionId }: Props) {
   const snap = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
-  const session = useSessionStore();
 
   useEffect(() => {
     return () => {
@@ -59,8 +83,8 @@ export default function RemoteClient({ sessionId, follow = false }: Props) {
     if (sessionId === null) {
       return;
     }
-    void bootstrap(sessionId, follow);
-  }, [sessionId, follow]);
+    void bootstrap(sessionId);
+  }, [sessionId]);
 
   useEffect(() => {
     if (snap.sessionId !== null && snap.phase !== "not_found" && snap.phase !== "loading") {
@@ -68,18 +92,33 @@ export default function RemoteClient({ sessionId, follow = false }: Props) {
     }
   }, [snap.sessionId, snap.phase]);
 
+  return (
+    <>
+      <p role="status" className="min-h-5 px-4 pt-3 text-center text-sm text-neutral-400">
+        {snap.reconnecting ? PHONE_RECONNECTING : ""}
+      </p>
+      <RemoteScreen sessionId={sessionId} snap={snap} />
+    </>
+  );
+}
+
+function RemoteScreen({ sessionId, snap }: { sessionId: string | null; snap: RemoteSnapshot }) {
+  const session = useSessionStore();
+
   if (sessionId === null) {
     return (
       <main className="flex flex-1 items-center justify-center px-6 text-center">
-        <p className="text-neutral-400">Missing or invalid session link.</p>
+        <p className="text-neutral-400">{PHONE_LINK_INCOMPLETE}</p>
       </main>
     );
   }
 
-  if (snap.phase === "loading") {
+  if (snap.phase === "loading" || snap.phase === "connect") {
     return (
       <main className="flex flex-1 items-center justify-center px-6 text-center">
-        <p className="text-neutral-400">Loading session…</p>
+        <p className="text-neutral-300" aria-live="polite">
+          {PHONE_CONNECTING}
+        </p>
       </main>
     );
   }
@@ -87,38 +126,65 @@ export default function RemoteClient({ sessionId, follow = false }: Props) {
   if (snap.phase === "not_found") {
     return (
       <main className="flex flex-1 items-center justify-center px-6 text-center">
-        <p className="text-neutral-400">
-          {snap.errorMessage ??
-            "This test has ended on the main screen. Scan the new code there to start again."}
-        </p>
+        <p className="text-neutral-400">{PHONE_SESSION_ENDED}</p>
       </main>
     );
   }
 
   if (snap.phase === "error") {
     return (
-      <main className="flex flex-1 items-center justify-center px-6 text-center">
+      <main className="flex flex-1 flex-col items-center justify-center gap-6 px-6 text-center">
         <p className="text-red-400">
           {snap.errorMessage ??
             "Something went wrong connecting to the main screen. Reload this page to try again."}
         </p>
+        <button
+          type="button"
+          onClick={() => {
+            void bootstrap(sessionId);
+          }}
+          className="min-h-14 w-full max-w-sm rounded-lg bg-sky-600 px-6 text-lg font-medium text-white hover:bg-sky-500 active:bg-sky-400"
+        >
+          {PHONE_TRY_AGAIN}
+        </button>
       </main>
     );
   }
 
-  if (snap.phase === "connect") {
+  if (snap.phase === "go_to_mark") {
     return (
-      <main className="flex flex-1 flex-col items-center justify-center gap-6 px-6">
-        <p className="text-center text-neutral-300">Ready to join this vision check.</p>
-        <button
-          type="button"
-          onClick={() => {
-            void connect();
-          }}
-          className="min-h-14 w-full max-w-sm rounded-lg bg-sky-600 px-6 text-lg font-medium text-white hover:bg-sky-500 active:bg-sky-400"
-        >
-          Connect
-        </button>
+      <main className="flex flex-1 flex-col items-center justify-center gap-6 px-6 text-center">
+        <p className="text-lg text-emerald-400">{PHONE_CONNECTED}</p>
+        {snap.positionReset && (
+          <p className="text-lg leading-relaxed text-neutral-100">{PHONE_POSITION_RESET}</p>
+        )}
+        <p className="text-lg leading-relaxed text-neutral-200">{PHONE_GO_TO_MARK}</p>
+        <div className="flex w-full max-w-sm flex-col gap-2">
+          <button
+            type="button"
+            disabled={snap.positionSending}
+            aria-busy={snap.positionSending}
+            onClick={() => {
+              void confirmPosition();
+            }}
+            className="min-h-14 w-full rounded-lg bg-sky-600 px-6 text-lg font-medium text-white hover:bg-sky-500 active:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {snap.positionSending ? PHONE_SENDING : PHONE_AT_MARK_BUTTON}
+          </button>
+          <p className="min-h-12 text-red-400" aria-live="polite">
+            {snap.positionFailed ? PHONE_POSITION_FAILED : ""}
+          </p>
+        </div>
+      </main>
+    );
+  }
+
+  if (snap.phase === "at_mark") {
+    return (
+      <main className="flex flex-1 flex-col items-center justify-center gap-6 px-6 text-center">
+        <p className="text-lg text-emerald-400">{PHONE_CONNECTED}</p>
+        <p className="text-lg leading-relaxed text-neutral-200">{PHONE_LOOK_AT_SCREEN}</p>
+        <StillWaitingLine show={snap.stillWaiting} />
       </main>
     );
   }
@@ -126,7 +192,7 @@ export default function RemoteClient({ sessionId, follow = false }: Props) {
   if (snap.phase === "complete") {
     return (
       <main className="flex flex-1 items-center justify-center px-6 text-center">
-        <p className="text-lg text-emerald-400">{"Test complete. Your result is on the main screen. Keep this page open if you'd like to test again."}</p>
+        <p className="text-lg text-emerald-400">{"Test complete. Your result is on the main screen. Keep this page open if you’d like to test again."}</p>
       </main>
     );
   }
@@ -141,6 +207,7 @@ export default function RemoteClient({ sessionId, follow = false }: Props) {
           <p className="text-neutral-200">{`Answer sent: ${snap.lastSentLabel}`}</p>
         )}
         <p className="text-neutral-300">{waitingLine}</p>
+        <StillWaitingLine show={snap.stillWaiting} />
       </main>
     );
   }
@@ -160,7 +227,7 @@ export default function RemoteClient({ sessionId, follow = false }: Props) {
           }}
           className="min-h-14 w-full max-w-sm rounded-lg bg-amber-600 px-6 text-lg font-medium text-white hover:bg-amber-500 active:bg-amber-400"
         >
-          {snap.choiceLocked ? "Sending…" : "Tap to retry"}
+          {snap.choiceLocked ? PHONE_SENDING : "Tap to retry"}
         </button>
       </main>
     );

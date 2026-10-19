@@ -27,6 +27,7 @@ export const PHONE_TRY_AGAIN = "Try again";
 export const PHONE_LINK_INCOMPLETE =
   "This link isn’t complete. Scan the code on the main screen again.";
 export const REFRESH_PAGE = "Refresh the page";
+export const SHOW_CODE_AGAIN = "Show the code again";
 
 export function stopReasonText(reason: "calibration" | "zoom" | "window" | null): string | null {
   if (reason === "calibration") {

@@ -4,7 +4,7 @@
  */
 
 export const DEFAULT_TEST_DISTANCE_MM = 3000;
-export const ALLOWED_TEST_DISTANCES_MM: readonly number[] = [3000];
+export const ALLOWED_TEST_DISTANCES_MM: readonly number[] = [3000, 2000];
 
 export type DistanceConfirmation = { distanceMm: number; confirmed: boolean };
 
@@ -13,16 +13,32 @@ export type DistanceGateResult =
   | { ok: false; reason: "not-confirmed" | "not-allowed" };
 
 export const DISTANCE_HEADING = "Set up your test position";
-export const DISTANCE_INSTRUCTION =
-  "Measure 3 metres from where your eyes will be to this computer screen, and mark that spot on the floor.";
 export const DISTANCE_PHONE_NOTE =
   "Your phone stays with you at that spot. You’ll use it to answer.";
-export const DISTANCE_CONFIRM_LABEL = "I’ve measured and marked 3 metres from the screen";
-export const MSG_DISTANCE_NOT_CONFIRMED =
-  "Tick the box to confirm you’ve marked 3 metres from the screen, then press Start.";
-export const MSG_SCREEN_CANNOT_SHOW_AT_3M =
-  "This screen can’t show the test letters at 3 metres. Make the browser window full size, then press Start again. If it’s already full size, use a larger screen.";
+export const SMALL_ROOM_LINK = "I don’t have 3 metres of space";
+export const USE_3M_LINK = "Use 3 metres instead";
+export const TWO_M_NOTE = "3 metres is recommended. Use 2 metres only if your room is too small.";
 export const MSG_SETUP_FAILED = "The test couldn’t be set up. Refresh the page and try again.";
+
+export function metresText(distanceMm: number): string {
+  return `${distanceMm / 1000} metres`;
+}
+
+export function distanceInstruction(distanceMm: number): string {
+  return `Measure ${metresText(distanceMm)} from where your eyes will be to this computer screen, and mark that spot on the floor.`;
+}
+
+export function distanceConfirmLabel(distanceMm: number): string {
+  return `I’ve measured and marked ${metresText(distanceMm)} from the screen`;
+}
+
+export function msgDistanceNotConfirmed(distanceMm: number): string {
+  return `Tick the box to confirm you’ve marked ${metresText(distanceMm)} from the screen, then press Start.`;
+}
+
+export function msgScreenCannotShow(distanceMm: number): string {
+  return `This screen can’t show the test letters at ${metresText(distanceMm)}. Make the browser window full size, then press Start again. If it’s already full size, use a larger screen.`;
+}
 
 /** Confirmation is checked before the distance, so an unticked box always reports not-confirmed. */
 export function checkDistanceBeforeStart(input: DistanceConfirmation): DistanceGateResult {

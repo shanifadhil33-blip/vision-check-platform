@@ -3,7 +3,7 @@
  * customer wording for that step. Pure values in, decision out (AGENTS.md rule 1).
  */
 
-import { storedDistanceMatches } from "./distanceSetup";
+import { metresText, storedDistanceMatches } from "./distanceSetup";
 
 export type SetupOutcome = "ok" | "calibration" | "zoom" | "window" | null;
 
@@ -111,11 +111,20 @@ export const COUNTDOWN_NUMBERS: readonly number[] = [3, 2, 1];
 export const COUNTDOWN_STEP_MS = 1000;
 
 export const MAIN_PHONE_CONNECTED = "Phone connected ✓";
-export const MAIN_GO_TO_MARK =
-  "Go to your mark, 3 metres from this screen, and tap “I’m at my mark” on your phone.";
 export const PHONE_CONNECTED = "Phone connected ✓";
-export const PHONE_GO_TO_MARK =
-  "Now go to your mark, 3 metres from the computer screen, and keep this phone with you.";
+
+export function mainGoToMark(distanceMm: number): string {
+  return `Go to your mark, ${metresText(distanceMm)} from this screen, and tap “I’m at my mark” on your phone.`;
+}
+
+/** null when the phone has not read the session's distance. */
+export function phoneGoToMark(distanceMm: number | null): string {
+  if (distanceMm === null) {
+    return "Now go to your mark and keep this phone with you.";
+  }
+  return `Now go to your mark, ${metresText(distanceMm)} from the computer screen, and keep this phone with you.`;
+}
+
 export const PHONE_AT_MARK_BUTTON = "I’m at my mark";
 export const PHONE_LOOK_AT_SCREEN =
   "Look at the large screen and use your phone to select the letter you see.";

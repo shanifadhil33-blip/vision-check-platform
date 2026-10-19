@@ -18,8 +18,9 @@ import {
 import {
   ALLOWED_TEST_DISTANCES_MM,
   checkDistanceBeforeStart,
-  MSG_DISTANCE_NOT_CONFIRMED,
-  MSG_SCREEN_CANNOT_SHOW_AT_3M,
+  DEFAULT_TEST_DISTANCE_MM,
+  msgDistanceNotConfirmed,
+  msgScreenCannotShow,
   MSG_SETUP_FAILED,
   storedDistanceMatches,
   type DistanceConfirmation,
@@ -54,6 +55,7 @@ import {
 } from "@/lib/session/loopState";
 import * as sessionStore from "@/lib/session/sessionStore";
 import { isResponseCorrect } from "./isResponseCorrect";
+import { forgetOpenSession, readOpenSession, rememberOpenSession } from "./openSessionMemory";
 import {
   setVisibilityPresentationId,
   startVisibilityTracking,
@@ -147,7 +149,7 @@ type SetupProbe = () => {
 type RespondedState = Extract<LoopState, { phase: "responded" }>;
 
 const POLL_MS = 3000;
-const CLIENT_BUILD = "m6-distance-3";
+const CLIENT_BUILD = "m6-distance-4";
 
 export const MSG_CONNECTION = "The test lost its connection. Refresh the page to carry on.";
 const MSG_SESSION_ENDED = "This test has ended. Start a new test to continue.";
@@ -206,6 +208,7 @@ let setupStopped = false;
 let skippingDuplicateTrial = false;
 let backInFlight = false;
 let endedSessionClose: Promise<void> | null = null;
+let straySessionClose: Promise<void> | null = null;
 let visibilityGeneration = 0;
 let visibilityChain: Promise<void> = Promise.resolve();
 let stateChain: Promise<void> = Promise.resolve();
@@ -244,12 +247,42 @@ function testUrl(sessionId: string | null): string {
   return query === "" ? window.location.pathname : `${window.location.pathname}?${query}`;
 }
 
+function addressSessionId(): string | null {
+  return new URLSearchParams(window.location.search).get("session");
+}
+
+/** Adds one history entry when the address goes from no session to a session; otherwise replaces. */
 function setSessionIdInUrl(sessionId: string): void {
+  if (addressSessionId() === null) {
+    window.history.pushState({ vcp: "session" }, "", testUrl(sessionId));
+    return;
+  }
   window.history.replaceState(window.history.state, "", testUrl(sessionId));
 }
 
 function clearSessionIdFromUrl(): void {
   window.history.replaceState(window.history.state, "", testUrl(null));
+}
+
+/**
+ * Browser Back or Forward on the test page. Returns "back-to-start" when the
+ * address lost its session while the page is past Start; the caller then
+ * takes the same path as the Back to the start button. While a session is
+ * being created or resumed the address is left alone.
+ */
+export function addressPopped(): "back-to-start" | "none" {
+  const phase = cachedSnapshot.phase;
+  if (phase === "creating" || phase === "resuming") {
+    return "none";
+  }
+  const sessionId = addressSessionId();
+  if (sessionId === null) {
+    return phase === "idle" ? "none" : "back-to-start";
+  }
+  if (sessionId !== cachedSnapshot.sessionId) {
+    window.history.replaceState(window.history.state, "", testUrl(cachedSnapshot.sessionId));
+  }
+  return "none";
 }
 
 function detailText(detail: unknown): string {
@@ -796,6 +829,9 @@ async function closeOpenSession(
       }
       await writeAbandonedRetryOnce(readyState(runForState));
     }
+    if (session.sessionId !== null) {
+      forgetOpenSession(session.sessionId);
+    }
   } catch (error) {
     console.error(error);
   }
@@ -811,10 +847,14 @@ async function closeOpenSession(
 }
 
 /**
- * Called once per page load when ?session= is valid but calibration is not.
- * Loads that session and closes it if it is still open.
+ * Called once per page load when ?session= is valid but calibration is not,
+ * and for a session this tab left open. Loads that session and closes it if
+ * it is still open.
  */
-export async function closeSessionById(sessionId: string): Promise<void> {
+export async function closeSessionById(
+  sessionId: string,
+  reason = "calibration_invalid_on_reload",
+): Promise<void> {
   if (!isSessionUuid(sessionId)) {
     return;
   }
@@ -832,13 +872,35 @@ export async function closeSessionById(sessionId: string): Promise<void> {
       return;
     }
     const loopState = parseLoopState(loaded.data.currentState);
-    await closeOpenSession(
-      "calibration_invalid_on_reload",
-      loopState === null ? null : loopState.run,
-    );
+    await closeOpenSession(reason, loopState === null ? null : loopState.run);
   } catch (error) {
     console.error(error);
   }
+}
+
+/**
+ * Called on mount when the address holds no valid session. Closes the
+ * session this tab left open, then forgets it. start() awaits this, so no
+ * new session is created while the close runs.
+ */
+export function closeStraySession(): void {
+  if (straySessionClose !== null) {
+    return;
+  }
+  const sessionId = readOpenSession();
+  if (sessionId === null) {
+    return;
+  }
+  const close = (async () => {
+    await closeSessionById(sessionId, "stray_session_on_open");
+    forgetOpenSession();
+  })();
+  straySessionClose = close;
+  void close.finally(() => {
+    if (straySessionClose === close) {
+      straySessionClose = null;
+    }
+  });
 }
 
 /**
@@ -967,6 +1029,7 @@ async function rebuildHistoryFromAnsweredTrials(sessionId: string): Promise<{
 }
 
 async function persistHiddenVoid(trial: ActiveTrial): Promise<void> {
+  const generation = resumeGeneration;
   if (!voidEventSent.has(trial.trialIndex)) {
     voidEventSent.add(trial.trialIndex);
     const eventResult = await sessionStore.appendEvent({
@@ -1002,12 +1065,15 @@ async function persistHiddenVoid(trial: ActiveTrial): Promise<void> {
       run: currentRun,
     }),
   );
-  if (stateResult.ok) {
+  if (stateResult.ok || generation !== resumeGeneration) {
     return;
   }
   voidStateSaved.delete(presentationId);
   if (stateResult.error.kind === "version-conflict") {
     await captureVoidedAnswerIfResponded();
+    if (generation !== resumeGeneration) {
+      return;
+    }
     const latestRun = run;
     const latestPresentationId = trial.presentationId;
     if (latestRun === null || latestPresentationId === null || disposed || setupStopped) {
@@ -1024,7 +1090,9 @@ async function persistHiddenVoid(trial: ActiveTrial): Promise<void> {
       }),
     );
     if (!retry.ok) {
-      fail(MSG_CONNECTION, "void_state_retry_failed", retry.error);
+      if (generation === resumeGeneration) {
+        fail(MSG_CONNECTION, "void_state_retry_failed", retry.error);
+      }
       return;
     }
     voidStateSaved.add(latestPresentationId);
@@ -1046,6 +1114,7 @@ async function restoreFreshTrialIfNeeded(): Promise<void> {
   ) {
     return;
   }
+  const generation = resumeGeneration;
   const rewritten = await writeState(
     "running",
     awaitingResponseState({
@@ -1055,6 +1124,9 @@ async function restoreFreshTrialIfNeeded(): Promise<void> {
       run: currentRun,
     }),
   );
+  if (generation !== resumeGeneration) {
+    return;
+  }
   if (!rewritten.ok) {
     fail(MSG_CONNECTION, "restore_fresh_write_failed", rewritten.error);
     return;
@@ -1064,10 +1136,26 @@ async function restoreFreshTrialIfNeeded(): Promise<void> {
   }
 }
 
+/** Logged only against its own session: after Back the store may hold a later one. */
+async function logTestQualityFailure(sessionId: string | null, message: string): Promise<void> {
+  if (sessionId === null || sessionStore.getSnapshot().sessionId !== sessionId) {
+    return;
+  }
+  const logged = await sessionStore.appendEvent({
+    type: "test_quality_write_failed",
+    payload: { message },
+  });
+  if (!logged.ok) {
+    console.error(logged.error);
+  }
+}
+
 async function finishRun(): Promise<void> {
   if (disposed || setupStopped) {
     return;
   }
+  const generation = resumeGeneration;
+  const runSessionId = sessionStore.getSnapshot().sessionId;
   const currentRun = run;
   const currentStaircase = staircase;
   if (currentRun === null || currentStaircase === null || currentStaircase.status !== "finished") {
@@ -1088,14 +1176,21 @@ async function finishRun(): Promise<void> {
     completeState(letterCount, { run: currentRun, result }),
   );
   if (!done.ok) {
+    if (generation !== resumeGeneration) {
+      return;
+    }
     fail(MSG_CONNECTION, "finish_complete_write_failed", done.error);
     return;
   }
-  if (disposed || setupStopped) {
-    return;
+  if (runSessionId !== null) {
+    forgetOpenSession(runSessionId);
   }
-  if (channel !== null) {
+  // A completed session gets its quality row even after Back; the nudge and the screen only while this run is current.
+  if (!disposed && !setupStopped && generation === resumeGeneration && channel !== null) {
     await channel.sendNudge("complete");
+  }
+  if (sessionStore.getSnapshot().sessionId !== runSessionId) {
+    return;
   }
   try {
     const qualityResult = await sessionStore.upsertTestQuality(
@@ -1108,26 +1203,14 @@ async function finishRun(): Promise<void> {
     );
     if (!qualityResult.ok) {
       console.error(qualityResult.error);
-      const logged = await sessionStore.appendEvent({
-        type: "test_quality_write_failed",
-        payload: { message: qualityResult.error.message },
-      });
-      if (!logged.ok) {
-        console.error(logged.error);
-      }
+      await logTestQualityFailure(runSessionId, qualityResult.error.message);
     }
   } catch (error) {
     console.error(error);
     const message = error instanceof Error ? error.message : String(error);
-    const logged = await sessionStore.appendEvent({
-      type: "test_quality_write_failed",
-      payload: { message },
-    });
-    if (!logged.ok) {
-      console.error(logged.error);
-    }
+    await logTestQualityFailure(runSessionId, message);
   }
-  if (disposed || setupStopped) {
+  if (disposed || setupStopped || generation !== resumeGeneration) {
     return;
   }
   activeTrial = null;
@@ -1150,12 +1233,13 @@ async function finishRun(): Promise<void> {
 }
 
 async function captureVoidedAnswerIfResponded(): Promise<void> {
+  const generation = resumeGeneration;
   const sessionId = cachedSnapshot.sessionId;
   if (sessionId === null || disposed || setupStopped) {
     return;
   }
   const loaded = await sessionStore.loadSession(sessionId);
-  if (!loaded.ok || disposed || setupStopped) {
+  if (!loaded.ok || disposed || setupStopped || generation !== resumeGeneration) {
     return;
   }
   if (loaded.data.status === "abandoned") {
@@ -1190,9 +1274,10 @@ async function tryAdvanceFromResponded(): Promise<void> {
   }
 
   advanceInFlight = true;
+  const generation = resumeGeneration;
   try {
     const loaded = await sessionStore.loadSession(sessionId);
-    if (!loaded.ok || disposed || setupStopped) {
+    if (!loaded.ok || disposed || setupStopped || generation !== resumeGeneration) {
       return;
     }
     if (loaded.data.status === "abandoned") {
@@ -1454,7 +1539,10 @@ async function presentNextLetter(): Promise<void> {
     currentRun === null ||
     calibration === null
   ) {
-    fail(MSG_SCREEN_CANNOT_SHOW_AT_3M, "staircase_not_running");
+    fail(
+      msgScreenCannotShow(cachedSnapshot.distanceMm ?? DEFAULT_TEST_DISTANCE_MM),
+      "staircase_not_running",
+    );
     return;
   }
 
@@ -1594,7 +1682,11 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
       return;
     }
     trial.recorded = true;
+    const generation = resumeGeneration;
     const recorded = await sessionStore.recordPresentation(payload);
+    if (generation !== resumeGeneration) {
+      return;
+    }
     if (!recorded.ok) {
       trial.recorded = false;
       if (isDuplicateTrialIndex(recorded.error) && !skippingDuplicateTrial) {
@@ -1652,6 +1744,9 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
         choices: [...trial.choices],
       },
     });
+    if (generation !== resumeGeneration) {
+      return;
+    }
     if (!eventResult.ok) {
       fail(MSG_CONNECTION, "choices_offered_failed", eventResult.error);
       return;
@@ -1671,6 +1766,9 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
         run: currentRun,
       }),
     );
+    if (generation !== resumeGeneration) {
+      return;
+    }
     if (!stateResult.ok) {
       fail(MSG_CONNECTION, "awaiting_response_write_failed", stateResult.error);
       return;
@@ -1678,6 +1776,9 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
 
     if (channel !== null) {
       await channel.sendNudge("awaiting_response");
+    }
+    if (generation !== resumeGeneration) {
+      return;
     }
 
     patch({ phase: "awaiting_response" });
@@ -1740,6 +1841,17 @@ export function prepareTestAgain(): void {
   });
 }
 
+/** Clears a start screen message left by an earlier Start press, which may name the other distance. */
+export function dismissStartError(): void {
+  if (
+    cachedSnapshot.phase === "error" &&
+    cachedSnapshot.sessionId === null &&
+    cachedSnapshot.errorMessage !== null
+  ) {
+    patch({ errorMessage: null, errorDetail: null });
+  }
+}
+
 /**
  * Closes the held session unless it is complete or already abandoned, then
  * returns to the start screen holding nothing from it: same module state and
@@ -1750,6 +1862,10 @@ export async function backToStart(): Promise<void> {
     return;
   }
   backInFlight = true;
+  const heldSessionId = sessionStore.getSnapshot().sessionId ?? cachedSnapshot.sessionId;
+  // Letter work still in flight stops at its next check instead of drawing or writing.
+  resumeGeneration += 1;
+  setupStopped = true;
   try {
     clearCountdown();
     stopPoll();
@@ -1759,7 +1875,9 @@ export async function backToStart(): Promise<void> {
       await endedSessionClose;
     }
     await closeOpenSession("back_to_start");
-    resumeGeneration += 1;
+    if (heldSessionId !== null) {
+      forgetOpenSession(heldSessionId);
+    }
     setupStopped = false;
     releaseScreenAwake();
     activeTrial = null;
@@ -1823,6 +1941,13 @@ export async function start(
 
   startInFlight = true;
   const generation = resumeGeneration;
+  if (straySessionClose !== null) {
+    await straySessionClose;
+    if (generation !== resumeGeneration) {
+      startInFlight = false;
+      return;
+    }
+  }
   if (endedSessionClose !== null) {
     await endedSessionClose;
     if (generation !== resumeGeneration) {
@@ -1852,7 +1977,7 @@ export async function start(
     const gate = checkDistanceBeforeStart(distance);
     if (!gate.ok) {
       if (gate.reason === "not-confirmed") {
-        fail(MSG_DISTANCE_NOT_CONFIRMED, "start_distance_not_confirmed");
+        fail(msgDistanceNotConfirmed(distance.distanceMm), "start_distance_not_confirmed");
       } else {
         fail(MSG_SETUP_FAILED, `start_distance_not_allowed ${String(distance.distanceMm)}`);
       }
@@ -1878,11 +2003,11 @@ export async function start(
         format,
       });
     } catch (error) {
-      fail(MSG_SCREEN_CANNOT_SHOW_AT_3M, "start_levels_failed", error);
+      fail(msgScreenCannotShow(distanceMm), "start_levels_failed", error);
       return;
     }
     if (levels.stepIndices.length === 0) {
-      fail(MSG_SCREEN_CANNOT_SHOW_AT_3M, "start_no_drawable_levels");
+      fail(msgScreenCannotShow(distanceMm), "start_no_drawable_levels");
       return;
     }
 
@@ -1897,11 +2022,11 @@ export async function start(
     try {
       started = startStaircase(nextRun.stepIndices);
     } catch (error) {
-      fail(MSG_SCREEN_CANNOT_SHOW_AT_3M, "start_staircase_failed", error);
+      fail(msgScreenCannotShow(distanceMm), "start_staircase_failed", error);
       return;
     }
     if (started.status !== "running") {
-      fail(MSG_SCREEN_CANNOT_SHOW_AT_3M, "start_staircase_not_running");
+      fail(msgScreenCannotShow(distanceMm), "start_staircase_not_running");
       return;
     }
     run = nextRun;
@@ -1941,6 +2066,7 @@ export async function start(
       fail(MSG_CONNECTION, "create_session_failed", created.error);
       return;
     }
+    rememberOpenSession(created.data.id);
     if (!storedDistanceMatches(distanceMm, created.data.distanceMmRequested)) {
       await abandonForDistanceMismatch(distanceMm, created.data.distanceMmRequested);
       return;
@@ -1960,7 +2086,7 @@ export async function start(
 
     const confirmedEvent = await sessionStore.appendEvent({
       type: "distance_confirmed",
-      payload: { distance_mm: distanceMm },
+      payload: { distance_mm: distanceMm, recommended_mm: DEFAULT_TEST_DISTANCE_MM },
     });
     if (!confirmedEvent.ok) {
       fail(MSG_CONNECTION, "distance_confirmed_event_failed", confirmedEvent.error);
@@ -2366,11 +2492,15 @@ async function beginTrials(): Promise<void> {
     staircase === null ||
     staircase.status !== "running"
   ) {
-    fail(MSG_SCREEN_CANNOT_SHOW_AT_3M, "begin_staircase_not_running");
+    fail(
+      msgScreenCannotShow(cachedSnapshot.distanceMm ?? DEFAULT_TEST_DISTANCE_MM),
+      "begin_staircase_not_running",
+    );
     return;
   }
 
   beginInFlight = true;
+  const generation = resumeGeneration;
   try {
     const session = sessionStore.getSnapshot();
     if (session.status !== "paired" && session.status !== "running") {
@@ -2379,6 +2509,9 @@ async function beginTrials(): Promise<void> {
     }
     if (session.status === "paired") {
       const running = await writeState("running", readyState(currentRun));
+      if (generation !== resumeGeneration) {
+        return;
+      }
       if (!running.ok) {
         fail(MSG_CONNECTION, "begin_running_write_failed", running.error);
         return;
@@ -2386,6 +2519,9 @@ async function beginTrials(): Promise<void> {
       if (channel !== null) {
         await channel.sendNudge("running");
       }
+    }
+    if (generation !== resumeGeneration) {
+      return;
     }
     await presentNextLetter();
   } finally {

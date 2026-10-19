@@ -41,7 +41,7 @@ export const CAL_ZOOM_WARNING_BODY =
 export const CAL_PAGE_TITLE = "Set up your screen";
 
 export const HOME_NEEDS =
-  "You’ll need a bank card (or a ruler), your phone, and 3 metres of space in front of the screen.";
+  "You’ll need a bank card (or a ruler), your phone, and ideally 3 metres of space in front of the screen.";
 
 /**
  * Customer warning for an implausible card match, read from the reason text

@@ -5,7 +5,7 @@ import {
   PHONE_AT_MARK_BUTTON,
   PHONE_CONNECTED,
   PHONE_CONNECTING,
-  PHONE_GO_TO_MARK,
+  phoneGoToMark,
   PHONE_LOOK_AT_SCREEN,
   PHONE_POSITION_FAILED,
 } from "@/lib/acuity/autoStart";
@@ -158,7 +158,9 @@ function RemoteScreen({ sessionId, snap }: { sessionId: string | null; snap: Rem
         {snap.positionReset && (
           <p className="text-lg leading-relaxed text-neutral-100">{PHONE_POSITION_RESET}</p>
         )}
-        <p className="text-lg leading-relaxed text-neutral-200">{PHONE_GO_TO_MARK}</p>
+        <p className="text-lg leading-relaxed text-neutral-200">
+          {phoneGoToMark(snap.distanceMmRequested)}
+        </p>
         <div className="flex w-full max-w-sm flex-col gap-2">
           <button
             type="button"

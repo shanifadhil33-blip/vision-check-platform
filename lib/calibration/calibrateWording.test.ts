@@ -103,7 +103,7 @@ describe("calibrateWording", () => {
 
   it("CW16 HOME_NEEDS is the exact what-you'll-need line", () => {
     expect(HOME_NEEDS).toBe(
-      "You\u2019ll need a bank card (or a ruler), your phone, and 3 metres of space in front of the screen.",
+      "You\u2019ll need a bank card (or a ruler), your phone, and ideally 3 metres of space in front of the screen.",
     );
   });
 });

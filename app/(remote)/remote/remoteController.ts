@@ -71,6 +71,8 @@ export type RemoteSnapshot = {
   stillWaiting: boolean;
   /** Three or more refreshes in a row have failed. */
   reconnecting: boolean;
+  /** The loaded session's requested test distance; null until loaded. */
+  distanceMmRequested: number | null;
 };
 
 const POLL_MS = 3000;
@@ -91,6 +93,7 @@ const SERVER_SNAPSHOT: RemoteSnapshot = {
   positionReset: false,
   stillWaiting: false,
   reconnecting: false,
+  distanceMmRequested: null,
 };
 
 function sentLabel(choice: ResponseChoice): string {
@@ -404,6 +407,9 @@ async function refreshFromServer(): Promise<void> {
     return;
   }
   noteRefreshSucceeded();
+  if (loaded.data.distanceMmRequested !== cachedSnapshot.distanceMmRequested) {
+    patch({ distanceMmRequested: loaded.data.distanceMmRequested });
+  }
   applyLoopState(parseLoopState(loaded.data.currentState), loaded.data.status);
 }
 
@@ -460,6 +466,8 @@ export async function bootstrap(sessionId: string): Promise<void> {
     failWithError(loaded.error, "connect");
     return;
   }
+
+  patch({ distanceMmRequested: loaded.data.distanceMmRequested });
 
   if (loaded.data.status === "abandoned") {
     showSessionEnded();

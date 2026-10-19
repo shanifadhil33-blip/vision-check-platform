@@ -13,6 +13,7 @@ import {
   QR_ALT,
   REFRESH_PAGE,
   RESULT_UNAVAILABLE_HEADING,
+  SHOW_CODE_AGAIN,
   START_NEW_TEST,
   STOP_REASON_CALIBRATION,
   STOP_REASON_WINDOW,
@@ -102,6 +103,10 @@ describe("flow wording", () => {
 
   it("FW18 REFRESH_PAGE", () => {
     expect(REFRESH_PAGE).toBe("Refresh the page");
+  });
+
+  it("FW19 SHOW_CODE_AGAIN", () => {
+    expect(SHOW_CODE_AGAIN).toBe("Show the code again");
   });
 });
 

@@ -1,14 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   checkDistanceBeforeStart,
-  DISTANCE_CONFIRM_LABEL,
+  distanceConfirmLabel,
   DISTANCE_HEADING,
-  DISTANCE_INSTRUCTION,
+  distanceInstruction,
   DISTANCE_PHONE_NOTE,
-  MSG_DISTANCE_NOT_CONFIRMED,
-  MSG_SCREEN_CANNOT_SHOW_AT_3M,
+  metresText,
+  msgDistanceNotConfirmed,
+  msgScreenCannotShow,
   MSG_SETUP_FAILED,
+  SMALL_ROOM_LINK,
   storedDistanceMatches,
+  TWO_M_NOTE,
+  USE_3M_LINK,
 } from "./distanceSetup";
 
 describe("checkDistanceBeforeStart", () => {
@@ -26,10 +30,10 @@ describe("checkDistanceBeforeStart", () => {
     });
   });
 
-  it("D3 refuses a confirmed 2000 mm as not allowed", () => {
+  it("D3 allows a confirmed 2000 mm and returns 2000", () => {
     expect(checkDistanceBeforeStart({ distanceMm: 2000, confirmed: true })).toEqual({
-      ok: false,
-      reason: "not-allowed",
+      ok: true,
+      distanceMm: 2000,
     });
   });
 
@@ -54,9 +58,20 @@ describe("checkDistanceBeforeStart", () => {
   });
 
   it("D6 reports not-confirmed before not-allowed", () => {
-    expect(checkDistanceBeforeStart({ distanceMm: 2000, confirmed: false })).toEqual({
+    expect(checkDistanceBeforeStart({ distanceMm: 2500, confirmed: false })).toEqual({
       ok: false,
       reason: "not-confirmed",
+    });
+  });
+
+  it("D7 refuses 1 mm either side of 2000 mm", () => {
+    expect(checkDistanceBeforeStart({ distanceMm: 1999, confirmed: true })).toEqual({
+      ok: false,
+      reason: "not-allowed",
+    });
+    expect(checkDistanceBeforeStart({ distanceMm: 2001, confirmed: true })).toEqual({
+      ok: false,
+      reason: "not-allowed",
     });
   });
 });
@@ -82,9 +97,15 @@ describe("distance step wording", () => {
     expect(DISTANCE_HEADING).toBe("Set up your test position");
   });
 
-  it("W2 instruction", () => {
-    expect(DISTANCE_INSTRUCTION).toBe(
+  it("W2 instruction at 3000 mm", () => {
+    expect(distanceInstruction(3000)).toBe(
       "Measure 3 metres from where your eyes will be to this computer screen, and mark that spot on the floor.",
+    );
+  });
+
+  it("W2b instruction at 2000 mm", () => {
+    expect(distanceInstruction(2000)).toBe(
+      "Measure 2 metres from where your eyes will be to this computer screen, and mark that spot on the floor.",
     );
   });
 
@@ -94,23 +115,56 @@ describe("distance step wording", () => {
     );
   });
 
-  it("W4 confirm label", () => {
-    expect(DISTANCE_CONFIRM_LABEL).toBe("I’ve measured and marked 3 metres from the screen");
+  it("W4 confirm label at 3000 mm", () => {
+    expect(distanceConfirmLabel(3000)).toBe("I’ve measured and marked 3 metres from the screen");
   });
 
-  it("W5 not confirmed message", () => {
-    expect(MSG_DISTANCE_NOT_CONFIRMED).toBe(
+  it("W4b confirm label at 2000 mm", () => {
+    expect(distanceConfirmLabel(2000)).toBe("I’ve measured and marked 2 metres from the screen");
+  });
+
+  it("W5 not confirmed message at 3000 mm", () => {
+    expect(msgDistanceNotConfirmed(3000)).toBe(
       "Tick the box to confirm you’ve marked 3 metres from the screen, then press Start.",
     );
   });
 
-  it("W6 screen cannot show at 3 m message", () => {
-    expect(MSG_SCREEN_CANNOT_SHOW_AT_3M).toBe(
+  it("W5b not confirmed message at 2000 mm", () => {
+    expect(msgDistanceNotConfirmed(2000)).toBe(
+      "Tick the box to confirm you’ve marked 2 metres from the screen, then press Start.",
+    );
+  });
+
+  it("W6 screen cannot show message at 3000 mm", () => {
+    expect(msgScreenCannotShow(3000)).toBe(
       "This screen can’t show the test letters at 3 metres. Make the browser window full size, then press Start again. If it’s already full size, use a larger screen.",
+    );
+  });
+
+  it("W6b screen cannot show message at 2000 mm", () => {
+    expect(msgScreenCannotShow(2000)).toBe(
+      "This screen can’t show the test letters at 2 metres. Make the browser window full size, then press Start again. If it’s already full size, use a larger screen.",
     );
   });
 
   it("W7 setup failed message", () => {
     expect(MSG_SETUP_FAILED).toBe("The test couldn’t be set up. Refresh the page and try again.");
+  });
+
+  it("W8 metresText for 3000 and 2000 mm", () => {
+    expect(metresText(3000)).toBe("3 metres");
+    expect(metresText(2000)).toBe("2 metres");
+  });
+
+  it("W9 small room link", () => {
+    expect(SMALL_ROOM_LINK).toBe("I don’t have 3 metres of space");
+  });
+
+  it("W10 use 3 metres link", () => {
+    expect(USE_3M_LINK).toBe("Use 3 metres instead");
+  });
+
+  it("W11 two metre note", () => {
+    expect(TWO_M_NOTE).toBe("3 metres is recommended. Use 2 metres only if your room is too small.");
   });
 });

@@ -4,13 +4,13 @@ import {
   autoStartDecision,
   COUNTDOWN_NUMBERS,
   COUNTDOWN_STEP_MS,
-  MAIN_GO_TO_MARK,
+  mainGoToMark,
   MAIN_PHONE_CONNECTED,
   MSG_ZOOM_AT_START,
   PHONE_AT_MARK_BUTTON,
   PHONE_CONNECTED,
   PHONE_CONNECTING,
-  PHONE_GO_TO_MARK,
+  phoneGoToMark,
   PHONE_LOOK_AT_SCREEN,
   PHONE_POSITION_FAILED,
   PHONE_STILL_WAITING_MS,
@@ -224,9 +224,15 @@ describe("customer strings", () => {
     expect(MAIN_PHONE_CONNECTED).toBe("Phone connected \u2713");
   });
 
-  it("W2 MAIN_GO_TO_MARK", () => {
-    expect(MAIN_GO_TO_MARK).toBe(
+  it("W2 mainGoToMark at 3000 mm", () => {
+    expect(mainGoToMark(3000)).toBe(
       "Go to your mark, 3 metres from this screen, and tap \u201CI\u2019m at my mark\u201D on your phone.",
+    );
+  });
+
+  it("W2b mainGoToMark at 2000 mm", () => {
+    expect(mainGoToMark(2000)).toBe(
+      "Go to your mark, 2 metres from this screen, and tap \u201CI\u2019m at my mark\u201D on your phone.",
     );
   });
 
@@ -234,10 +240,20 @@ describe("customer strings", () => {
     expect(PHONE_CONNECTED).toBe("Phone connected \u2713");
   });
 
-  it("W4 PHONE_GO_TO_MARK", () => {
-    expect(PHONE_GO_TO_MARK).toBe(
+  it("W4 phoneGoToMark at 3000 mm", () => {
+    expect(phoneGoToMark(3000)).toBe(
       "Now go to your mark, 3 metres from the computer screen, and keep this phone with you.",
     );
+  });
+
+  it("W4b phoneGoToMark at 2000 mm", () => {
+    expect(phoneGoToMark(2000)).toBe(
+      "Now go to your mark, 2 metres from the computer screen, and keep this phone with you.",
+    );
+  });
+
+  it("W4c phoneGoToMark with no distance", () => {
+    expect(phoneGoToMark(null)).toBe("Now go to your mark and keep this phone with you.");
   });
 
   it("W5 PHONE_AT_MARK_BUTTON", () => {

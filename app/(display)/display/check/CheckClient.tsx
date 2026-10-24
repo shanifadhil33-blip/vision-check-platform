@@ -225,6 +225,9 @@ export default function CheckClient() {
       <main className={MAIN_CLASS}>
         <h1 className={HEADING_CLASS}>{HEADING}</h1>
         <p className={BODY_CLASS}>{INTRO}</p>
+        <Link href="/display/check/sizes" className={LINK_CLASS}>
+          Letter size check
+        </Link>
         {capture?.zoom.state === "not-default" && <p className={BODY_CLASS}>{ZOOM_WARNING}</p>}
         {capture !== null && !capture.screenSetUp && (
           <>

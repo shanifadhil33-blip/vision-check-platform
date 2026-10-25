@@ -82,13 +82,20 @@ export function sizeCheckStep(
   return Math.max(...drawableStepIndices);
 }
 
+/** White space above the arrow and below the letters, so a ruler can find the letter edge. */
+export const SIZE_CHECK_AREA_MARGIN_CSS_PX = 32;
+
 /**
- * Height TripletCanvas takes at this letter height: the letters plus the arrow
- * and the gap above them, each clamp(12, letter, 40) CSS px. Must stay equal to
- * clampArrowCssPx in TripletCanvas.tsx.
+ * Height of the white area at this letter height: the letters plus the arrow
+ * and the gap above them, each clamp(12, letter, 40) CSS px, plus the margin
+ * above and below. The clamp must stay equal to clampArrowCssPx in TripletCanvas.tsx.
  */
 export function sizeCheckAreaHeightCssPx(largestLetterCssPx: number): number {
-  return largestLetterCssPx + 2 * Math.min(40, Math.max(12, largestLetterCssPx));
+  return (
+    largestLetterCssPx +
+    2 * Math.min(40, Math.max(12, largestLetterCssPx)) +
+    2 * SIZE_CHECK_AREA_MARGIN_CSS_PX
+  );
 }
 
 export function formatMm(value: number): string {

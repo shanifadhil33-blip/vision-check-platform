@@ -139,14 +139,14 @@ describe("sizeCheckStep", () => {
 
 describe("sizeCheckAreaHeightCssPx", () => {
   it("A1 adds twice the letter height when it is between 12 and 40 px", () => {
-    expect(sizeCheckAreaHeightCssPx(30)).toBe(30 + 60);
+    expect(sizeCheckAreaHeightCssPx(30)).toBe(30 + 60 + 64);
   });
 
   it("A2 adds twice 12 px when the letter is under 12 px", () => {
-    expect(sizeCheckAreaHeightCssPx(10)).toBe(10 + 24);
+    expect(sizeCheckAreaHeightCssPx(10)).toBe(10 + 24 + 64);
   });
 
   it("A3 adds twice 40 px when the letter is over 40 px", () => {
-    expect(sizeCheckAreaHeightCssPx(200)).toBe(200 + 80);
+    expect(sizeCheckAreaHeightCssPx(200)).toBe(200 + 80 + 64);
   });
 });

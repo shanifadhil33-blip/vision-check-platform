@@ -12,6 +12,7 @@ import {
   computeTestLevels,
 } from "@/lib/acuity/testLevels";
 import {
+  SIZE_CHECK_AREA_MARGIN_CSS_PX,
   SIZE_CHECK_DISTANCES_MM,
   distanceText,
   drawnValueText,
@@ -393,7 +394,12 @@ export default function SizeCheckClient() {
         <>
           <div
             className="flex w-full items-center justify-center bg-white"
-            style={{ minHeight: `${areaMinHeightCssPx}px` }}
+            style={{
+              minHeight: `${areaMinHeightCssPx}px`,
+              paddingTop: `${SIZE_CHECK_AREA_MARGIN_CSS_PX}px`,
+              paddingBottom: `${SIZE_CHECK_AREA_MARGIN_CSS_PX}px`,
+              boxSizing: "border-box",
+            }}
           >
             <TripletCanvas
               left="D"

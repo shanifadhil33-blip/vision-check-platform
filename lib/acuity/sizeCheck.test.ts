@@ -9,6 +9,7 @@ import {
   sizeCheckCopyText,
   sizeCheckStep,
   sizeValues,
+  shouldIgnorePointer,
 } from "./sizeCheck";
 
 const DENOMINATORS: ReadonlyArray<[number, number]> = [
@@ -74,9 +75,9 @@ describe("formatMm and formatLogMar", () => {
 });
 
 describe("drawnMm and roundingAllowanceMm", () => {
-  it("S5 converts screen pixels to millimetres and gives half a screen pixel as the allowance", () => {
+  it("S5 converts screen pixels to millimetres and gives one and a half screen pixels as the allowance", () => {
     expect(drawnMm(273, 4.1764, 1.5)).toBeCloseTo(43.578, 3);
-    expect(roundingAllowanceMm(4.1764, 1.5)).toBeCloseTo(0.08, 3);
+    expect(roundingAllowanceMm(4.1764, 1.5)).toBeCloseTo(0.239, 3);
   });
 });
 
@@ -104,7 +105,7 @@ describe("sizeCheckCopyText", () => {
         "Expected stroke width: 8.73 mm",
         "From the rounded label: height 43.63 mm, stroke 8.73 mm",
         "Drawn on this screen: 273 screen pixels, about 43.58 mm",
-        "Screen pixel size: 0.160 mm, so the drawn letter can differ by up to 0.08 mm",
+        "Screen pixel size: 0.160 mm, so the drawn letter can differ by up to 0.24 mm",
         "At 2 metres this size is 29.09 mm",
         "Screen set up: 4.1764 CSS px per mm, pixel ratio 1.5",
       ].join("\n"),
@@ -148,5 +149,43 @@ describe("sizeCheckAreaHeightCssPx", () => {
 
   it("A3 adds twice 40 px when the letter is over 40 px", () => {
     expect(sizeCheckAreaHeightCssPx(200)).toBe(200 + 80 + 64);
+  });
+});
+
+describe("shouldIgnorePointer", () => {
+  const ignoringInput = {
+    ignoring: true,
+    eventPointerType: null,
+    lastPointerType: null,
+    msSinceLastPointerDown: null,
+  };
+
+  it("T1 never ignores when ignoring is off", () => {
+    for (const eventPointerType of ["touch", "pen", "mouse", "", null]) {
+      expect(
+        shouldIgnorePointer({
+          ignoring: false,
+          eventPointerType,
+          lastPointerType: "touch",
+          msSinceLastPointerDown: 100,
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it("T2 ignores touch and pen but not mouse", () => {
+    expect(shouldIgnorePointer({ ...ignoringInput, eventPointerType: "touch" })).toBe(true);
+    expect(shouldIgnorePointer({ ...ignoringInput, eventPointerType: "pen" })).toBe(true);
+    expect(shouldIgnorePointer({ ...ignoringInput, eventPointerType: "mouse" })).toBe(false);
+  });
+
+  it("T3 with no pointer type, ignores within 1000 ms of a touch pointerdown only", () => {
+    const afterTouch = { ...ignoringInput, lastPointerType: "touch" };
+    expect(shouldIgnorePointer({ ...afterTouch, msSinceLastPointerDown: 500 })).toBe(true);
+    expect(shouldIgnorePointer({ ...afterTouch, msSinceLastPointerDown: 1500 })).toBe(false);
+  });
+
+  it("T4 lets a keyboard click through", () => {
+    expect(shouldIgnorePointer({ ...ignoringInput, eventPointerType: "" })).toBe(false);
   });
 });

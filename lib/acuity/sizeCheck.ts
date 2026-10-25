@@ -118,8 +118,41 @@ export function drawnMm(
   return inkHeightDevicePx / (cssPxPerMm * devicePixelRatio);
 }
 
+/** Half a screen pixel for canvas rounding plus one for the anti-aliased top and bottom edges. */
 export function roundingAllowanceMm(cssPxPerMm: number, devicePixelRatio: number): number {
-  return 0.5 / (cssPxPerMm * devicePixelRatio);
+  return 1.5 / (cssPxPerMm * devicePixelRatio);
+}
+
+/** A click this soon after a touch or pen pointerdown counts as that touch or pen. */
+export const IGNORE_CLICK_AFTER_POINTER_DOWN_MS = 1000;
+
+function isTouchOrPen(pointerType: string): boolean {
+  return pointerType === "touch" || pointerType === "pen";
+}
+
+/**
+ * Whether to stop a pointer or click event while touches are ignored. An empty
+ * or missing pointer type (keyboard, or a browser that gives none) falls back
+ * to the last pointerdown, so keyboard activation with no recent touch passes.
+ */
+export function shouldIgnorePointer(input: {
+  ignoring: boolean;
+  eventPointerType: string | null;
+  lastPointerType: string | null;
+  msSinceLastPointerDown: number | null;
+}): boolean {
+  if (!input.ignoring) {
+    return false;
+  }
+  if (input.eventPointerType !== null && input.eventPointerType !== "") {
+    return isTouchOrPen(input.eventPointerType);
+  }
+  return (
+    input.lastPointerType !== null &&
+    isTouchOrPen(input.lastPointerType) &&
+    input.msSinceLastPointerDown !== null &&
+    input.msSinceLastPointerDown < IGNORE_CLICK_AFTER_POINTER_DOWN_MS
+  );
 }
 
 /** "273 screen pixels, about 43.58 mm". */

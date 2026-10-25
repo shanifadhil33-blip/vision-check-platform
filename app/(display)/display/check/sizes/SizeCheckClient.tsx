@@ -24,6 +24,7 @@ import {
   sizeCheckCopyText,
   sizeCheckStep,
   sizeValues,
+  shouldIgnorePointer,
   type SizeCheckDistanceMm,
   type SizeCheckLetter,
 } from "@/lib/acuity/sizeCheck";
@@ -69,6 +70,8 @@ const ZOOM_WARNING =
   "Your browser zoom isn\u2019t at 100%. Reset it to 100% (press Ctrl+0, or Cmd+0 on a Mac) and close any side panel.";
 const DISTANCE_GROUP = "Test distance";
 const LETTER_GROUP = "Letter";
+const IGNORE_TOUCHES = "Ignore touches while measuring";
+const IGNORE_TOUCHES_HINT = "Mouse and keyboard still work.";
 const SIZE_GROUP = "Size";
 const GREYED_NOTE =
   "Sizes that don\u2019t fit this window at this distance are greyed out.";
@@ -156,6 +159,7 @@ export default function SizeCheckClient() {
     inkHeightDevicePx: number;
   } | null>(null);
   const [copyState, setCopyState] = useState<CopyState>("idle");
+  const [ignoreTouches, setIgnoreTouches] = useState(false);
   const [dateIso] = useState(() =>
     typeof window === "undefined" ? "" : new Date().toISOString().slice(0, 10),
   );
@@ -177,6 +181,61 @@ export default function SizeCheckClient() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!ignoreTouches) {
+      return;
+    }
+    let lastPointerType: string | null = null;
+    let lastPointerDownTimeStampMs: number | null = null;
+
+    const stop = (event: Event): void => {
+      event.stopPropagation();
+      event.preventDefault();
+    };
+    const handlePointerDown = (event: PointerEvent): void => {
+      lastPointerType = event.pointerType;
+      lastPointerDownTimeStampMs = event.timeStamp;
+      if (
+        shouldIgnorePointer({
+          ignoring: true,
+          eventPointerType: event.pointerType,
+          lastPointerType: null,
+          msSinceLastPointerDown: null,
+        })
+      ) {
+        stop(event);
+      }
+    };
+    const handleClick = (event: MouseEvent): void => {
+      if (
+        shouldIgnorePointer({
+          ignoring: true,
+          eventPointerType: event instanceof PointerEvent ? event.pointerType : null,
+          lastPointerType,
+          msSinceLastPointerDown:
+            lastPointerDownTimeStampMs === null
+              ? null
+              : event.timeStamp - lastPointerDownTimeStampMs,
+        })
+      ) {
+        stop(event);
+      }
+    };
+    const handleTouchStart = (event: TouchEvent): void => {
+      event.preventDefault();
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown, { capture: true });
+    window.addEventListener("click", handleClick, { capture: true });
+    // Window touch listeners default to passive in some browsers, which would ignore preventDefault.
+    window.addEventListener("touchstart", handleTouchStart, { capture: true, passive: false });
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown, { capture: true });
+      window.removeEventListener("click", handleClick, { capture: true });
+      window.removeEventListener("touchstart", handleTouchStart, { capture: true });
+    };
+  }, [ignoreTouches]);
 
   const setUpCalibration = calibration !== null && validity?.ok === true ? calibration : null;
   const zoomState =
@@ -361,6 +420,23 @@ export default function SizeCheckClient() {
             );
           })}
         </OptionGroup>
+        <div className="flex flex-col gap-1">
+          <label className={`flex min-h-11 cursor-pointer items-center gap-3 ${BODY_CLASS}`}>
+            <input
+              type="checkbox"
+              checked={ignoreTouches}
+              aria-describedby="size-check-ignore-touches-hint"
+              className="h-5 w-5 accent-sky-600"
+              onChange={(event) => {
+                setIgnoreTouches(event.target.checked);
+              }}
+            />
+            {IGNORE_TOUCHES}
+          </label>
+          <p id="size-check-ignore-touches-hint" className="text-sm text-neutral-400">
+            {IGNORE_TOUCHES_HINT}
+          </p>
+        </div>
         <div className="flex flex-col gap-2">
           <OptionGroup id="size-check-size" label={SIZE_GROUP}>
             {SIZE_STEP_INDICES_DESCENDING.map((optionStepIndex) => {

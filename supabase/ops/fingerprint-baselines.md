@@ -63,6 +63,15 @@ Each entry records the output of `supabase/ops/fingerprint.sql` after a verified
 - Table fingerprint: c9a26c7a6ec5def009a47167f889db5b (was 9fecaa86562f6a2a9f42d916b52745c3; changed because calibrations_method_chk now allows 'card-id1' and 'ruler-bar')
 - Note: vcp.calibrations held 27 rows before and after.
 
+## 20261101120000_vcp_landolt
+
+- Version: 20261101120000_vcp_landolt
+- Applied: 1 November 2026
+- Live state before apply: every function body, every grant and the seven registered versions matched the migration files.
+- Preflight: SAFE TO APPLY, 16 of 16 (961 presentations and 923 responses fit the new checks). Verify: MIGRATION VERIFIED, 28 of 28. Smoke test: 29 of 30 with cleanup PASS; r5 failed on the script's own expectation (the c22 exception block also undid its pairing call), corrected in the same commit as this entry. Test session removed.
+- RPC surface fingerprint: 95ef606c838ebf8c8c35ce0995b95a41 (was 4174314eb9ad3ba7bbbf8cf2fa94e4df; changed because vcp_set_test_mode and vcp_submit_direction_response were added; every existing argument list and grant unchanged)
+- Table fingerprint: 1413fe68f0de26ab6f788c105d58b825 (was c9a26c7a6ec5def009a47167f889db5b; changed by the new columns sessions.test_mode, presentations.is_practice and landolt_direction, responses.response_direction and test_quality.test_mode, and the added or widened checks)
+
 ## Parked
 
 - `vcp.calibrations.session_id` is a foreign key with no index. The only FK without one. Negligible at Phase A row counts.

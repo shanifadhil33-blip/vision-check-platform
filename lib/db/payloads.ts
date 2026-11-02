@@ -1,9 +1,12 @@
 import { SLOAN_LETTERS, type SloanLetter } from "@/lib/acuity";
+import { LANDOLT_DIRECTIONS, type LandoltDirection } from "@/lib/acuity/landoltStaircase";
 import type { Json } from "./types";
 
 export type Eye = "right" | "left" | "both";
 
 export type PresentationFormat = "single" | "flanked-triplet" | "row";
+
+export type TestMode = "letters" | "landolt";
 
 export type SessionStatus =
   | "created"
@@ -27,7 +30,7 @@ export type PresentationPayload = {
   requested_letter_height_device_px: number;
   optotypes: SloanLetter[];
   target_index: number;
-  format: PresentationFormat;
+  format: PresentationFormat | "landolt";
   distance_mm_requested: number;
   actual_letter_height_device_px?: number;
   actual_stroke_width_device_px?: number;
@@ -35,11 +38,36 @@ export type PresentationPayload = {
   distance_mm_observed?: number;
   rendered_at?: string;
   visibility_confirmed?: boolean;
+  /** Landolt C only. Letter presentations never send it. */
+  landolt_direction?: LandoltDirection;
+  /** Landolt C only. Letter presentations never send it. */
+  is_practice?: boolean;
 };
 
 export type ResponseChoice =
   | { kind: "letter"; letter: SloanLetter }
   | { kind: "not_sure" };
+
+/**
+ * A Landolt C answer. Its not-sure kind is distinct from the letter one so a
+ * C answer can only ever be sent through vcp_submit_direction_response.
+ */
+export type DirectionChoice =
+  | { kind: "direction"; direction: LandoltDirection }
+  | { kind: "direction_not_sure" };
+
+export type AnyResponseChoice = ResponseChoice | DirectionChoice;
+
+export function isDirectionChoice(choice: AnyResponseChoice): choice is DirectionChoice {
+  return choice.kind === "direction" || choice.kind === "direction_not_sure";
+}
+
+export type DirectionSubmitResult = {
+  id: string;
+  responseKind: "direction" | "not_sure";
+  responseDirection: LandoltDirection | null;
+  duplicate: boolean;
+};
 
 export type SessionView = {
   id: string;
@@ -377,4 +405,46 @@ export function parseAnsweredTrials(value: unknown): AnsweredTrial[] | null {
     trials.push(parsed);
   }
   return trials;
+}
+
+const DIRECTION_SET: ReadonlySet<string> = new Set(LANDOLT_DIRECTIONS);
+
+function isLandoltDirection(value: unknown): value is LandoltDirection {
+  return typeof value === "string" && DIRECTION_SET.has(value);
+}
+
+/** Result of vcp_submit_direction_response. A letter kind is refused. */
+export function parseDirectionSubmitResult(value: unknown): DirectionSubmitResult | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const id = value.id;
+  const responseKind = value.response_kind;
+  const responseDirection = value.response_direction;
+  const duplicate = value.duplicate;
+
+  if (typeof id !== "string" || id.length === 0) {
+    return null;
+  }
+  if (typeof duplicate !== "boolean") {
+    return null;
+  }
+  if (responseKind === "direction") {
+    if (!isLandoltDirection(responseDirection)) {
+      return null;
+    }
+    return { id, responseKind, responseDirection, duplicate };
+  }
+  if (responseKind === "not_sure") {
+    if (responseDirection !== null) {
+      return null;
+    }
+    return { id, responseKind, responseDirection: null, duplicate };
+  }
+  return null;
+}
+
+/** Result of vcp_set_test_mode. */
+export function parseTestMode(value: unknown): TestMode | null {
+  return value === "letters" || value === "landolt" ? value : null;
 }

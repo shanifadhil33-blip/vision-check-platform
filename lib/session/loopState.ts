@@ -1,6 +1,12 @@
 import type { SloanLetter } from "@/lib/acuity/sloan";
 import { SLOAN_LETTERS } from "@/lib/acuity/sloan";
 import { COARSEST_TESTED_STEP_INDEX, FINEST_TESTED_STEP_INDEX } from "@/lib/acuity/testLevels";
+import {
+  LANDOLT_DIRECTIONS,
+  type CResult,
+  type LandoltDirection,
+} from "@/lib/acuity/landoltStaircase";
+import type { LandoltEye } from "@/lib/acuity/landoltWording";
 import type { Json } from "@/lib/db/types";
 
 export type RunContext = {
@@ -41,7 +47,53 @@ export type LoopState =
       nextSessionId: string | null;
     };
 
+/**
+ * A Landolt C run: the letter run fields plus the test mode and the eye.
+ * Letter runs never carry these two keys, so letter JSON is unchanged.
+ */
+export type LandoltRunContext = RunContext & { testMode: "landolt"; eye: LandoltEye };
+
+/**
+ * Landolt C loop states. Kept out of LoopState so the letter page, which
+ * types against LoopState, sees exactly the letter states it saw before.
+ * The ready state is shared with letters and is told apart by run.testMode.
+ */
+export type LandoltLoopState =
+  | { phase: "ready"; run: LandoltRunContext; positionConfirmed?: boolean }
+  | {
+      phase: "awaiting_response";
+      testMode: "landolt";
+      trialIndex: number;
+      presentationId: string;
+      practice: boolean;
+      run: LandoltRunContext;
+    }
+  | {
+      phase: "responded";
+      testMode: "landolt";
+      trialIndex: number;
+      presentationId: string;
+      responseId: string;
+      responseKind: "direction" | "not_sure";
+      responseDirection: LandoltDirection | null;
+      run: LandoltRunContext;
+    }
+  | {
+      phase: "complete";
+      testMode: "landolt";
+      trialsCompleted: number;
+      run: LandoltRunContext;
+      result: CResult | null;
+      nextSessionId: string | null;
+    };
+
+export type AnyLoopState = LoopState | LandoltLoopState;
+
 const SLOAN_SET: ReadonlySet<string> = new Set(SLOAN_LETTERS);
+
+const DIRECTION_SET: ReadonlySet<string> = new Set(LANDOLT_DIRECTIONS);
+
+const EYES: ReadonlySet<string> = new Set(["right", "left", "both"]);
 
 const SESSION_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -187,10 +239,194 @@ function parseChoices(value: unknown): SloanLetter[] | null {
   return choices;
 }
 
+/** True when the raw state belongs to a Landolt C run (top-level or run testMode). */
+function isLandoltFamily(value: Record<string, unknown>): boolean {
+  if (value.testMode === "landolt") {
+    return true;
+  }
+  const run = value.run;
+  return isRecord(run) && run.testMode === "landolt";
+}
+
+/** Letter states only, exactly as before. A Landolt C state is refused (null). */
 export function parseLoopState(value: unknown): LoopState | null {
   if (!isRecord(value)) {
     return null;
   }
+  if (isLandoltFamily(value)) {
+    return null;
+  }
+  return parseLetterLoopState(value);
+}
+
+/** Either family: letter states by the letter rules, C states by the C rules. */
+export function parseAnyLoopState(value: unknown): AnyLoopState | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (isLandoltFamily(value)) {
+    return parseLandoltLoopState(value);
+  }
+  return parseLetterLoopState(value);
+}
+
+export function isLandoltRun(run: RunContext | null | undefined): run is LandoltRunContext {
+  return (
+    run !== null &&
+    run !== undefined &&
+    "testMode" in run &&
+    (run as { testMode?: unknown }).testMode === "landolt"
+  );
+}
+
+export function isLandoltState(state: AnyLoopState): state is LandoltLoopState {
+  return isLandoltRun(state.run);
+}
+
+export function parseLandoltRunContext(value: unknown): LandoltRunContext | null {
+  if (!isRecord(value) || value.testMode !== "landolt") {
+    return null;
+  }
+  const eye = value.eye;
+  if (typeof eye !== "string" || !EYES.has(eye)) {
+    return null;
+  }
+  const base = parseRunContext(value);
+  if (base === null) {
+    return null;
+  }
+  return { ...base, testMode: "landolt", eye: eye as LandoltEye };
+}
+
+function isStepIndex(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= FINEST_TESTED_STEP_INDEX &&
+    value <= COARSEST_TESTED_STEP_INDEX
+  );
+}
+
+export function parseCResult(value: unknown): CResult | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const kind = value.kind;
+  if (kind === "measured" || kind === "screen-limited") {
+    return isStepIndex(value.stepIndex) ? { kind, stepIndex: value.stepIndex } : null;
+  }
+  if (kind === "test-floor") {
+    return value.stepIndex === FINEST_TESTED_STEP_INDEX ? { kind, stepIndex: -1 } : null;
+  }
+  if (kind === "not-measurable") {
+    return isStepIndex(value.coarsestStepIndex)
+      ? { kind, coarsestStepIndex: value.coarsestStepIndex }
+      : null;
+  }
+  if (kind === "inconsistent") {
+    return { kind };
+  }
+  return null;
+}
+
+function isDirection(value: unknown): value is LandoltDirection {
+  return typeof value === "string" && DIRECTION_SET.has(value);
+}
+
+function parseLandoltLoopState(value: Record<string, unknown>): LandoltLoopState | null {
+  const run = parseLandoltRunContext(value.run);
+  if (run === null) {
+    return null;
+  }
+  const phase = value.phase;
+  if (phase === "ready") {
+    const positionConfirmed = value.positionConfirmed;
+    if (positionConfirmed === undefined) {
+      return { phase: "ready", run };
+    }
+    if (typeof positionConfirmed !== "boolean") {
+      return null;
+    }
+    return { phase: "ready", run, positionConfirmed };
+  }
+  if (value.testMode !== "landolt") {
+    return null;
+  }
+  if (phase === "complete") {
+    if (!isNonNegInt(value.trialsCompleted)) {
+      return null;
+    }
+    return {
+      phase: "complete",
+      testMode: "landolt",
+      trialsCompleted: value.trialsCompleted,
+      run,
+      result: parseCResult(value.result),
+      nextSessionId: nextSessionIdFrom(value.nextSessionId),
+    };
+  }
+  if (!isNonNegInt(value.trialIndex)) {
+    return null;
+  }
+  if (typeof value.presentationId !== "string" || value.presentationId.length === 0) {
+    return null;
+  }
+  if (phase === "awaiting_response") {
+    // A C state offers no letter choices; one that carries them is refused.
+    if ("choices" in value) {
+      return null;
+    }
+    if (typeof value.practice !== "boolean") {
+      return null;
+    }
+    return {
+      phase: "awaiting_response",
+      testMode: "landolt",
+      trialIndex: value.trialIndex,
+      presentationId: value.presentationId,
+      practice: value.practice,
+      run,
+    };
+  }
+  if (phase === "responded") {
+    if (typeof value.responseId !== "string" || value.responseId.length === 0) {
+      return null;
+    }
+    // A C answer is never a letter.
+    if ("responseLetter" in value) {
+      return null;
+    }
+    const responseKind = value.responseKind;
+    const rawDirection = value.responseDirection;
+    let responseDirection: LandoltDirection | null;
+    if (responseKind === "direction") {
+      if (!isDirection(rawDirection)) {
+        return null;
+      }
+      responseDirection = rawDirection;
+    } else if (responseKind === "not_sure") {
+      if (rawDirection !== null) {
+        return null;
+      }
+      responseDirection = null;
+    } else {
+      return null;
+    }
+    return {
+      phase: "responded",
+      testMode: "landolt",
+      trialIndex: value.trialIndex,
+      presentationId: value.presentationId,
+      responseId: value.responseId,
+      responseKind,
+      responseDirection,
+      run,
+    };
+  }
+  return null;
+}
+
+function parseLetterLoopState(value: Record<string, unknown>): LoopState | null {
   const run = parseRunContext(value.run);
   const phase = value.phase;
   if (phase === "ready") {
@@ -280,13 +516,19 @@ export function parseLoopState(value: unknown): LoopState | null {
 }
 
 function runJson(run: RunContext): Json {
-  return {
+  const body: { [key: string]: Json } = {
     correction: run.correction,
     stepIndices: [...run.stepIndices],
     finestLimitedBy: run.finestLimitedBy,
     coarsestLimitedBy: run.coarsestLimitedBy,
     voidedTrialIndices: [...run.voidedTrialIndices],
   };
+  // Only a Landolt C run carries these keys, so a letter run's JSON is unchanged.
+  if (isLandoltRun(run)) {
+    body.testMode = run.testMode;
+    body.eye = run.eye;
+  }
+  return body;
 }
 
 function resultJson(result: RunResult): Json {
@@ -381,4 +623,75 @@ export function completeState(
     body.nextSessionId = nextSessionId;
   }
   return withOptionalRun;
+}
+
+export function landoltAwaitingResponseState(args: {
+  trialIndex: number;
+  presentationId: string;
+  practice: boolean;
+  run: LandoltRunContext;
+}): Json {
+  return withRun(
+    {
+      phase: "awaiting_response",
+      testMode: "landolt",
+      trialIndex: args.trialIndex,
+      presentationId: args.presentationId,
+      practice: args.practice,
+    },
+    args.run,
+  );
+}
+
+export function landoltRespondedState(args: {
+  trialIndex: number;
+  presentationId: string;
+  responseId: string;
+  responseKind: "direction" | "not_sure";
+  responseDirection: LandoltDirection | null;
+  run: LandoltRunContext;
+}): Json {
+  return withRun(
+    {
+      phase: "responded",
+      testMode: "landolt",
+      trialIndex: args.trialIndex,
+      presentationId: args.presentationId,
+      responseId: args.responseId,
+      responseKind: args.responseKind,
+      responseDirection: args.responseKind === "direction" ? args.responseDirection : null,
+    },
+    args.run,
+  );
+}
+
+function cResultJson(result: CResult): Json {
+  if (result.kind === "not-measurable") {
+    return { kind: result.kind, coarsestStepIndex: result.coarsestStepIndex };
+  }
+  if (result.kind === "inconsistent") {
+    return { kind: result.kind };
+  }
+  return { kind: result.kind, stepIndex: result.stepIndex };
+}
+
+export function landoltCompleteState(
+  trialsCompleted: number,
+  options: {
+    run: LandoltRunContext;
+    result: CResult;
+    nextSessionId?: string | null;
+  },
+): Json {
+  const body: { [key: string]: Json } = {
+    phase: "complete",
+    testMode: "landolt",
+    trialsCompleted,
+  };
+  withRun(body, options.run);
+  body.result = cResultJson(options.result);
+  if (typeof options.nextSessionId === "string") {
+    body.nextSessionId = options.nextSessionId;
+  }
+  return body;
 }

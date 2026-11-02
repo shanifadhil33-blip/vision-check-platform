@@ -6,9 +6,10 @@ import {
   PHONE_CONNECTED,
   PHONE_CONNECTING,
   phoneGoToMark,
-  PHONE_LOOK_AT_SCREEN,
   PHONE_POSITION_FAILED,
 } from "@/lib/acuity/autoStart";
+import { DIRECTION_BUTTON_LABELS, PHONE_NOT_SURE } from "@/lib/acuity/landoltWording";
+import type { LandoltDirection } from "@/lib/acuity/landoltStaircase";
 import {
   PHONE_LINK_INCOMPLETE,
   PHONE_POSITION_RESET,
@@ -20,6 +21,7 @@ import {
 } from "@/lib/acuity/flowWording";
 import type { SloanLetter } from "@/lib/acuity/sloan";
 import { useSessionStore } from "@/lib/session/useSessionStore";
+import { phoneLookAtScreen, phonePrompt, phoneWaitingLine } from "./remoteView";
 import {
   answer,
   bootstrap,
@@ -61,6 +63,27 @@ function choiceButtonClass(
   }
   return `${base} bg-neutral-100 text-neutral-900 hover:bg-neutral-200 active:bg-neutral-300`;
 }
+
+/** Same colours and busy, selected and dimmed states as the letter buttons; at least 88 by 88 CSS px. */
+function directionButtonClass(selected: boolean, dimOthers: boolean): string {
+  const base =
+    "flex min-h-[88px] min-w-[88px] items-center justify-center rounded-lg px-1 text-xl font-semibold whitespace-nowrap transition-colors disabled:cursor-not-allowed";
+  if (selected) {
+    return `${base} bg-sky-200 text-neutral-900`;
+  }
+  if (dimOthers) {
+    return `${base} bg-neutral-100 text-neutral-900 opacity-40`;
+  }
+  return `${base} bg-neutral-100 text-neutral-900 hover:bg-neutral-200 active:bg-neutral-300`;
+}
+
+/** Fixed cross: Up top centre, Left and Right in the middle row, Down bottom centre. */
+const DIRECTION_CELLS: readonly { direction: LandoltDirection; cell: string }[] = [
+  { direction: "up", cell: "col-start-2 row-start-1" },
+  { direction: "left", cell: "col-start-1 row-start-2" },
+  { direction: "right", cell: "col-start-3 row-start-2" },
+  { direction: "down", cell: "col-start-2 row-start-3" },
+];
 
 function StillWaitingLine({ show }: { show: boolean }) {
   return (
@@ -185,7 +208,9 @@ function RemoteScreen({ sessionId, snap }: { sessionId: string | null; snap: Rem
     return (
       <main className="flex flex-1 flex-col items-center justify-center gap-6 px-6 text-center">
         <p className="text-lg text-emerald-400">{PHONE_CONNECTED}</p>
-        <p className="text-lg leading-relaxed text-neutral-200">{PHONE_LOOK_AT_SCREEN}</p>
+        <p className="text-lg leading-relaxed text-neutral-200">
+          {phoneLookAtScreen(snap.testMode)}
+        </p>
         <StillWaitingLine show={snap.stillWaiting} />
       </main>
     );
@@ -200,9 +225,7 @@ function RemoteScreen({ sessionId, snap }: { sessionId: string | null; snap: Rem
   }
 
   if (snap.phase === "waiting" || snap.phase === "sent") {
-    const waitingLine = snap.everSawTrial
-      ? "Waiting for the next letter…"
-      : "Connected. Waiting for the first letter…";
+    const waitingLine = phoneWaitingLine(snap.testMode, snap.everSawTrial);
     return (
       <main className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
         {snap.lastSentLabel !== null && (
@@ -245,6 +268,51 @@ function RemoteScreen({ sessionId, snap }: { sessionId: string | null; snap: Rem
   const selected = snap.selectedChoice;
   const dimOthers = selected !== null;
   const sending = snap.choiceLocked && snap.selectedChoice !== null;
+
+  if (snap.testMode === "landolt") {
+    const notSureSelected = selected !== null && selected.kind === "direction_not_sure";
+    return (
+      <main className="flex flex-1 flex-col gap-3 px-4 py-6">
+        <p className="text-center text-sm text-neutral-400">{phonePrompt("landolt", snap.practice)}</p>
+        <p className="min-h-5 text-center text-sm text-neutral-200" aria-live="polite">
+          {sending ? "Sending your answer…" : ""}
+        </p>
+        <div className="mx-auto grid w-full max-w-sm grid-cols-3 grid-rows-3 gap-3">
+          {DIRECTION_CELLS.map(({ direction, cell }) => {
+            const isSelected =
+              selected !== null && selected.kind === "direction" && selected.direction === direction;
+            return (
+              <button
+                key={direction}
+                type="button"
+                disabled={disabled}
+                onClick={() => {
+                  void answer({ kind: "direction", direction });
+                }}
+                className={`${cell} ${directionButtonClass(isSelected, dimOthers && !isSelected)}`}
+              >
+                {DIRECTION_BUTTON_LABELS[direction]}
+              </button>
+            );
+          })}
+        </div>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => {
+            void answer({ kind: "direction_not_sure" });
+          }}
+          className={`mx-auto w-full max-w-sm ${choiceButtonClass(
+            notSureSelected,
+            dimOthers && !notSureSelected,
+            "not_sure",
+          )}`}
+        >
+          {PHONE_NOT_SURE}
+        </button>
+      </main>
+    );
+  }
 
   return (
     <main className="flex flex-1 flex-col gap-3 px-4 py-6">

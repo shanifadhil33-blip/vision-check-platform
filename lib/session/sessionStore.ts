@@ -14,21 +14,32 @@ import {
   pairSession as rpcPairSession,
   recordPresentation as rpcRecordPresentation,
   setSessionState as rpcSetSessionState,
+  setTestMode as rpcSetTestMode,
+  submitDirectionResponse as rpcSubmitDirectionResponse,
   submitResponse as rpcSubmitResponse,
   upsertTestQuality as rpcUpsertTestQuality,
   type RpcResult,
 } from "@/lib/db/rpc";
-import type {
-  PresentationPayload,
-  ResponseChoice,
-  SessionStatus,
-  SessionView,
+import {
+  isDirectionChoice,
+  type AnyResponseChoice,
+  type DirectionChoice,
+  type Eye,
+  type PresentationPayload,
+  type ResponseChoice,
+  type SessionStatus,
+  type SessionView,
+  type TestMode,
 } from "@/lib/db/payloads";
 import { newClientRequestId } from "./clientRequestId";
 
-export type ResponseEntry = {
+/**
+ * One answer being sent. C defaults to the letter choice, so every letter
+ * caller sees the type it always saw; Landolt C entries use DirectionChoice.
+ */
+export type ResponseEntry<C extends AnyResponseChoice = ResponseChoice> = {
   clientRequestId: string;
-  choice: ResponseChoice;
+  choice: C;
   respondedAtIso: string;
   latencyMs: number | null;
   state: "pending" | "sent" | "failed";
@@ -44,7 +55,7 @@ export type SessionSnapshot = {
   version: number | null;
   calibrationId: string | null;
   lastError: VcpError | null;
-  responses: Readonly<Record<string, ResponseEntry>>;
+  responses: Readonly<Record<string, ResponseEntry<AnyResponseChoice>>>;
 };
 
 const SERVER_SNAPSHOT: SessionSnapshot = {
@@ -336,7 +347,48 @@ export async function upsertTestQuality(quality: Json): Promise<RpcResult<string
   return result;
 }
 
-function upsertResponse(presentationId: string, entry: ResponseEntry): void {
+/** Landolt C sessions only, straight after create while the status is created. */
+export async function setTestMode(testMode: TestMode): Promise<RpcResult<TestMode>> {
+  const sessionId = cachedSnapshot.sessionId;
+  if (sessionId === null) {
+    const error = noSessionError();
+    setLastError(error);
+    return { ok: false, error };
+  }
+
+  const result = await rpcSetTestMode({ sessionId, testMode });
+  if (!result.ok) {
+    setLastError(result.error);
+    return result;
+  }
+
+  patch({ lastError: null });
+  return result;
+}
+
+/** Quality row for the eye tested. The letter page keeps upsertTestQuality, which is always both eyes. */
+export async function upsertTestQualityForEye(
+  eye: Eye,
+  quality: Json,
+): Promise<RpcResult<string>> {
+  const sessionId = cachedSnapshot.sessionId;
+  if (sessionId === null) {
+    const error = noSessionError();
+    setLastError(error);
+    return { ok: false, error };
+  }
+
+  const result = await rpcUpsertTestQuality({ sessionId, eye, quality });
+  if (!result.ok) {
+    setLastError(result.error);
+    return result;
+  }
+
+  patch({ lastError: null });
+  return result;
+}
+
+function upsertResponse(presentationId: string, entry: ResponseEntry<AnyResponseChoice>): void {
   patch({
     responses: {
       ...cachedSnapshot.responses,
@@ -351,16 +403,16 @@ function upsertResponse(presentationId: string, entry: ResponseEntry): void {
  * Reuses entry.clientRequestId, choice, respondedAtIso and latencyMs.
  * increments attempts on each try.
  */
-async function sendResponseEntry(
+async function sendResponseEntry<C extends AnyResponseChoice>(
   sessionId: string,
   presentationId: string,
-  entry: ResponseEntry,
-): Promise<RpcResult<ResponseEntry>> {
+  entry: ResponseEntry<C>,
+): Promise<RpcResult<ResponseEntry<C>>> {
   let lastError: VcpError | null = null;
   let working = entry;
 
   for (let round = 1; round <= MAX_SUBMIT_ATTEMPTS; round += 1) {
-    const pending: ResponseEntry = {
+    const pending: ResponseEntry<C> = {
       ...working,
       attempts: working.attempts + 1,
       state: "pending",
@@ -369,17 +421,28 @@ async function sendResponseEntry(
     upsertResponse(presentationId, pending);
     working = pending;
 
-    const result = await rpcSubmitResponse({
-      sessionId,
-      presentationId,
-      clientRequestId: working.clientRequestId,
-      choice: working.choice,
-      respondedAtIso: working.respondedAtIso,
-      latencyMs: working.latencyMs,
-    });
+    const choice: AnyResponseChoice = working.choice;
+    // A C answer goes only to vcp_submit_direction_response; a letter answer only to vcp_submit_response.
+    const result = isDirectionChoice(choice)
+      ? await rpcSubmitDirectionResponse({
+          sessionId,
+          presentationId,
+          clientRequestId: working.clientRequestId,
+          choice,
+          respondedAtIso: working.respondedAtIso,
+          latencyMs: working.latencyMs,
+        })
+      : await rpcSubmitResponse({
+          sessionId,
+          presentationId,
+          clientRequestId: working.clientRequestId,
+          choice,
+          respondedAtIso: working.respondedAtIso,
+          latencyMs: working.latencyMs,
+        });
 
     if (result.ok) {
-      const sent: ResponseEntry = {
+      const sent: ResponseEntry<C> = {
         ...working,
         state: "sent",
         responseId: result.data.id,
@@ -392,7 +455,7 @@ async function sendResponseEntry(
     }
 
     lastError = result.error;
-    const failed: ResponseEntry = {
+    const failed: ResponseEntry<C> = {
       ...working,
       state: "failed",
       error: result.error,
@@ -421,7 +484,32 @@ export async function submitResponse(
   choice: ResponseChoice,
   latencyMs: number | null,
 ): Promise<RpcResult<ResponseEntry>> {
-  const existing = cachedSnapshot.responses[presentationId];
+  return submitAnyResponse(presentationId, choice, latencyMs, isLetterChoice);
+}
+
+/** Landolt C answer: same idempotent send path, through vcp_submit_direction_response. */
+export async function submitDirectionResponse(
+  presentationId: string,
+  choice: DirectionChoice,
+  latencyMs: number | null,
+): Promise<RpcResult<ResponseEntry<DirectionChoice>>> {
+  return submitAnyResponse(presentationId, choice, latencyMs, isDirectionChoice);
+}
+
+function isLetterChoice(choice: AnyResponseChoice): choice is ResponseChoice {
+  return !isDirectionChoice(choice);
+}
+
+async function submitAnyResponse<C extends AnyResponseChoice>(
+  presentationId: string,
+  choice: C,
+  latencyMs: number | null,
+  sameKind: (stored: AnyResponseChoice) => stored is C,
+): Promise<RpcResult<ResponseEntry<C>>> {
+  const stored = cachedSnapshot.responses[presentationId];
+  // An entry of the other kind is never resent through this kind's RPC.
+  const existing =
+    stored !== undefined && sameKind(stored.choice) ? (stored as ResponseEntry<C>) : undefined;
   if (existing !== undefined) {
     if (existing.state === "sent" || existing.state === "pending") {
       return { ok: true, data: existing };
@@ -444,7 +532,7 @@ export async function submitResponse(
     return { ok: false, error };
   }
 
-  const entry: ResponseEntry = {
+  const entry: ResponseEntry<C> = {
     clientRequestId: newClientRequestId(),
     choice,
     respondedAtIso: new Date().toISOString(),

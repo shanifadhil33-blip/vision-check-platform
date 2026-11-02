@@ -8,15 +8,21 @@ import {
 import { PHONE_SESSION_ENDED } from "@/lib/acuity/flowWording";
 import type { SloanLetter } from "@/lib/acuity/sloan";
 import type { VcpError, VcpErrorKind } from "@/lib/db/errors";
-import type { ResponseChoice } from "@/lib/db/payloads";
+import { isDirectionChoice, type AnyResponseChoice } from "@/lib/db/payloads";
 import { joinSessionChannel, type SessionChannel } from "@/lib/session/channel";
 import {
-  parseLoopState,
+  parseAnyLoopState,
   readyState,
-  respondedState,
-  type LoopState,
+  type AnyLoopState,
 } from "@/lib/session/loopState";
 import * as sessionStore from "@/lib/session/sessionStore";
+import {
+  choosingPatch,
+  phoneSentLabel,
+  respondedStateFor,
+  testModeOf,
+  type PhoneTestMode,
+} from "./remoteView";
 
 type PhoneErrorContext = "answer" | "connect";
 
@@ -60,7 +66,7 @@ export type RemoteSnapshot = {
   /** Label for the last confirmed answer ("N" or "Not sure"); never right/wrong. */
   lastSentLabel: string | null;
   /** Immediate tap highlight while sending. */
-  selectedChoice: ResponseChoice | null;
+  selectedChoice: AnyResponseChoice | null;
   /** "I’m at my mark" write in flight. */
   positionSending: boolean;
   /** Last "I’m at my mark" write failed. */
@@ -73,6 +79,10 @@ export type RemoteSnapshot = {
   reconnecting: boolean;
   /** The loaded session's requested test distance; null until loaded. */
   distanceMmRequested: number | null;
+  /** Letters unless the loop state's run says Landolt C. */
+  testMode: PhoneTestMode;
+  /** The C on screen is a practice C (Landolt C only). */
+  practice: boolean;
 };
 
 const POLL_MS = 3000;
@@ -94,14 +104,9 @@ const SERVER_SNAPSHOT: RemoteSnapshot = {
   stillWaiting: false,
   reconnecting: false,
   distanceMmRequested: null,
+  testMode: "letters",
+  practice: false,
 };
-
-function sentLabel(choice: ResponseChoice): string {
-  if (choice.kind === "not_sure") {
-    return "Not sure";
-  }
-  return choice.letter;
-}
 
 const listeners = new Set<() => void>();
 let cachedSnapshot: RemoteSnapshot = SERVER_SNAPSHOT;
@@ -265,10 +270,17 @@ function followNextSession(nextSessionId: string): void {
   window.location.replace(`/remote?session=${nextSessionId}`);
 }
 
-function applyLoopState(state: LoopState | null, status: string | null): void {
+function applyLoopState(state: AnyLoopState | null, status: string | null): void {
   if (status === "abandoned") {
     showSessionEnded();
     return;
+  }
+
+  if (state !== null) {
+    const testMode = testModeOf(state);
+    if (testMode !== cachedSnapshot.testMode) {
+      patch({ testMode });
+    }
   }
 
   if (status === "complete" || (state !== null && state.phase === "complete")) {
@@ -324,18 +336,7 @@ function applyLoopState(state: LoopState | null, status: string | null): void {
         choicesShownAtMs = Date.now();
         lastHandledPresentationId = state.presentationId;
       }
-      patch({
-        phase: "choosing",
-        choices: state.choices,
-        presentationId: state.presentationId,
-        trialIndex: state.trialIndex,
-        choiceLocked: false,
-        errorMessage: null,
-        everSawTrial: true,
-        lastSentLabel: null,
-        selectedChoice: null,
-        positionFailed: false,
-      });
+      patch(choosingPatch(state));
     }
     return;
   }
@@ -410,7 +411,7 @@ async function refreshFromServer(): Promise<void> {
   if (loaded.data.distanceMmRequested !== cachedSnapshot.distanceMmRequested) {
     patch({ distanceMmRequested: loaded.data.distanceMmRequested });
   }
-  applyLoopState(parseLoopState(loaded.data.currentState), loaded.data.status);
+  applyLoopState(parseAnyLoopState(loaded.data.currentState), loaded.data.status);
 }
 
 async function pollOnce(): Promise<void> {
@@ -474,13 +475,19 @@ export async function bootstrap(sessionId: string): Promise<void> {
     return;
   }
 
+  // Known before pairing, so the screens after the tap already use the right wording.
+  const loadedState = parseAnyLoopState(loaded.data.currentState);
+  if (loadedState !== null && testModeOf(loadedState) !== cachedSnapshot.testMode) {
+    patch({ testMode: testModeOf(loadedState) });
+  }
+
   if (loaded.data.status === "created") {
     patch({ phase: "connect", errorMessage: null });
     await connect();
     return;
   }
 
-  const loopState = parseLoopState(loaded.data.currentState);
+  const loopState = loadedState;
   if (loaded.data.status === "running" && loopState !== null && loopState.phase === "responded") {
     patch({ everSawTrial: true });
   }
@@ -531,7 +538,7 @@ async function writePositionOnce(sessionId: string): Promise<PositionAttempt> {
     }
     return { failed: reloaded.error };
   }
-  const state = parseLoopState(reloaded.data.currentState);
+  const state = parseAnyLoopState(reloaded.data.currentState);
   if (reloaded.data.status !== "paired" || state === null || state.phase !== "ready") {
     return { failed: { status: reloaded.data.status, state } };
   }
@@ -604,15 +611,12 @@ async function writeRespondedOnce(
   presentationId: string,
   trialIndex: number,
   responseId: string,
-  choice: ResponseChoice,
+  choice: AnyResponseChoice,
 ): Promise<WriteRespondedResult> {
   const sessionId = cachedSnapshot.sessionId;
   if (sessionId === null) {
     return { ok: false, kind: "no-session", original: "No session id" };
   }
-
-  const kind = choice.kind === "letter" ? "letter" : "not_sure";
-  const letter = choice.kind === "letter" ? choice.letter : null;
 
   const attempt = async (): Promise<
     "ok" | "conflict" | { failKind: VcpErrorKind; original: unknown }
@@ -630,7 +634,7 @@ async function writeRespondedOnce(
     ) {
       return { failKind: "session-not-found", original: reloaded.data };
     }
-    const state = parseLoopState(reloaded.data.currentState);
+    const state = parseAnyLoopState(reloaded.data.currentState);
     if (
       state === null ||
       state.phase !== "awaiting_response" ||
@@ -641,17 +645,14 @@ async function writeRespondedOnce(
         original: { status: reloaded.data.status, state },
       };
     }
-    const written = await sessionStore.setState(
-      "running",
-      respondedState({
-        trialIndex,
-        presentationId,
-        responseId,
-        responseKind: kind,
-        responseLetter: letter,
-        run: state.run,
-      }),
-    );
+    const responded = respondedStateFor(state, { trialIndex, presentationId, responseId }, choice);
+    if (responded === null) {
+      return {
+        failKind: "unknown",
+        original: { status: reloaded.data.status, state, choice },
+      };
+    }
+    const written = await sessionStore.setState("running", responded);
     if (written.ok) {
       return "ok";
     }
@@ -682,11 +683,15 @@ async function writeRespondedOnce(
   return { ok: false, kind: first.failKind, original: first.original };
 }
 
-export async function answer(choice: ResponseChoice): Promise<void> {
+export async function answer(choice: AnyResponseChoice): Promise<void> {
   if (answerInFlight) {
     return;
   }
   if (cachedSnapshot.phase !== "choosing" && cachedSnapshot.phase !== "send_failed") {
+    return;
+  }
+  // A C screen sends only C answers, a letter screen only letter answers.
+  if (isDirectionChoice(choice) !== (cachedSnapshot.testMode === "landolt")) {
     return;
   }
   const presentationId = cachedSnapshot.presentationId;
@@ -712,11 +717,9 @@ export async function answer(choice: ResponseChoice): Promise<void> {
         latencyMs = Math.round(Date.now() - choicesShownAtMs);
       }
 
-      const submitted = await sessionStore.submitResponse(
-        presentationId,
-        choice,
-        latencyMs,
-      );
+      const submitted = isDirectionChoice(choice)
+        ? await sessionStore.submitDirectionResponse(presentationId, choice, latencyMs)
+        : await sessionStore.submitResponse(presentationId, choice, latencyMs);
       if (!submitted.ok) {
         console.error(submitted.error);
         if (submitted.error.kind === "session-not-found") {
@@ -781,7 +784,7 @@ export async function answer(choice: ResponseChoice): Promise<void> {
       choiceLocked: true,
       errorMessage: null,
       choices: [],
-      lastSentLabel: sentLabel(sentEntry.choice),
+      lastSentLabel: phoneSentLabel(sentEntry.choice),
       selectedChoice: null,
     });
   } finally {

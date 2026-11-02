@@ -20,8 +20,12 @@ import {
   formatMm,
   labelGeometryText,
   screenPixelSizeText,
+  SIZE_CHECK_LETTER_LABELS,
   sizeCheckAreaHeightCssPx,
   sizeCheckCopyText,
+  sizeCheckFormat,
+  sizeCheckIntro,
+  sizeCheckRingValues,
   sizeCheckStep,
   sizeValues,
   shouldIgnorePointer,
@@ -30,11 +34,12 @@ import {
 } from "@/lib/acuity/sizeCheck";
 import { TripletCanvas } from "../../test/TripletCanvas";
 import type { OptotypeMeasurement } from "../../optotype/OptotypeCanvas";
+import { LandoltCanvas, type LandoltMeasurement } from "../../landolt/LandoltCanvas";
 import { useCalibration } from "../../calibrate/useCalibration";
 
 const DEFAULT_DISTANCE_MM: SizeCheckDistanceMm = 3000;
 const DEFAULT_LETTER: SizeCheckLetter = "H";
-const LETTERS: readonly SizeCheckLetter[] = ["H", "Z"];
+const LETTERS: readonly SizeCheckLetter[] = ["H", "Z", "landolt"];
 const MEASURING_DELAY_MS = 300;
 const COPIED_DURATION_MS = 2000;
 
@@ -59,8 +64,6 @@ const OPTION_DISABLED_CLASS =
   "cursor-not-allowed border-neutral-800 bg-neutral-950 text-neutral-600";
 
 const HEADING = "Letter size check";
-const INTRO =
-  "Shows one test size at a time, drawn exactly as in the test. Measure the middle letter with a ruler held flat against the screen.";
 const CHECK_LINK = "Screen drawing check";
 const MEASURING = "Measuring\u2026";
 const NOT_SET_UP =
@@ -96,6 +99,7 @@ type ScreenInputs = {
 function drawableStepIndicesFor(
   distanceMm: SizeCheckDistanceMm,
   screen: ScreenInputs,
+  letter: SizeCheckLetter,
 ): number[] {
   try {
     return computeTestLevels({
@@ -104,7 +108,7 @@ function drawableStepIndicesFor(
       cssPxPerMm: screen.cssPxPerMm,
       viewportWidthCssPx: screen.viewportWidthCssPx,
       viewportHeightCssPx: screen.viewportHeightCssPx,
-      format: "flanked-triplet",
+      format: sizeCheckFormat(letter),
     }).stepIndices;
   } catch {
     return [];
@@ -255,7 +259,8 @@ export default function SizeCheckClient() {
         }
       : null;
 
-  const drawableStepIndices = screen === null ? [] : drawableStepIndicesFor(distanceMm, screen);
+  const drawableStepIndices =
+    screen === null ? [] : drawableStepIndicesFor(distanceMm, screen, letter);
   const stepIndex = sizeCheckStep(preferredStepIndex, drawableStepIndices);
   const values = stepIndex === null ? null : sizeValues(stepIndex, distanceMm);
   const measureKey =
@@ -267,6 +272,19 @@ export default function SizeCheckClient() {
 
   const handleMeasured = useCallback(
     (result: OptotypeMeasurement) => {
+      if (measureKey === null) {
+        return;
+      }
+      setMeasurement({
+        key: measureKey,
+        inkHeightDevicePx: result.inkBounds === null ? 0 : result.inkBounds.heightPx,
+      });
+    },
+    [measureKey],
+  );
+
+  const handleLandoltMeasured = useCallback(
+    (result: LandoltMeasurement) => {
       if (measureKey === null) {
         return;
       }
@@ -348,9 +366,21 @@ export default function SizeCheckClient() {
     }
     setDistanceMm(nextDistanceMm);
     setPreferredStepIndex(
-      sizeCheckStep(stepIndex, drawableStepIndicesFor(nextDistanceMm, screen)),
+      sizeCheckStep(stepIndex, drawableStepIndicesFor(nextDistanceMm, screen, letter)),
     );
   };
+
+  const chooseLetter = (nextLetter: SizeCheckLetter): void => {
+    if (nextLetter === letter) {
+      return;
+    }
+    setLetter(nextLetter);
+    setPreferredStepIndex(
+      sizeCheckStep(stepIndex, drawableStepIndicesFor(distanceMm, screen, nextLetter)),
+    );
+  };
+
+  const ringValues = values !== null && letter === "landolt" ? sizeCheckRingValues(values, distanceMm) : null;
 
   async function copyValues(): Promise<void> {
     if (copiedTimerRef.current !== null) {
@@ -377,7 +407,7 @@ export default function SizeCheckClient() {
     <div className="flex min-h-full flex-1 flex-col">
       <main className={MAIN_CLASS}>
         <h1 className={HEADING_CLASS}>{HEADING}</h1>
-        <p className={BODY_CLASS}>{INTRO}</p>
+        <p className={BODY_CLASS}>{sizeCheckIntro(letter)}</p>
         <Link href="/display/check" className={LINK_CLASS}>
           {CHECK_LINK}
         </Link>
@@ -412,10 +442,10 @@ export default function SizeCheckClient() {
                 aria-pressed={selected}
                 className={optionClass(selected, false)}
                 onClick={() => {
-                  setLetter(optionLetter);
+                  chooseLetter(optionLetter);
                 }}
               >
-                {optionLetter}
+                {SIZE_CHECK_LETTER_LABELS[optionLetter]}
               </button>
             );
           })}
@@ -477,16 +507,28 @@ export default function SizeCheckClient() {
               boxSizing: "border-box",
             }}
           >
-            <TripletCanvas
-              left="D"
-              target={letter}
-              right="K"
-              logMar={values.logMar}
-              distanceMm={distanceMm}
-              cssPxPerMm={screen.cssPxPerMm}
-              devicePixelRatio={screen.devicePixelRatio}
-              onMeasured={handleMeasured}
-            />
+            {letter === "landolt" ? (
+              <LandoltCanvas
+                trialIndex={0}
+                direction="right"
+                stepIndex={values.stepIndex}
+                distanceMm={distanceMm}
+                cssPxPerMm={screen.cssPxPerMm}
+                devicePixelRatio={screen.devicePixelRatio}
+                onMeasured={handleLandoltMeasured}
+              />
+            ) : (
+              <TripletCanvas
+                left="D"
+                target={letter}
+                right="K"
+                logMar={values.logMar}
+                distanceMm={distanceMm}
+                cssPxPerMm={screen.cssPxPerMm}
+                devicePixelRatio={screen.devicePixelRatio}
+                onMeasured={handleMeasured}
+              />
+            )}
           </div>
           <div className={MAIN_CLASS}>
             <dl className="flex flex-col">
@@ -494,6 +536,13 @@ export default function SizeCheckClient() {
               <ValueRow term="Exact logMAR" value={formatLogMar(values.logMar)} />
               <ValueRow term="Expected letter height" value={formatMm(values.heightMm)} />
               <ValueRow term="Expected stroke width" value={formatMm(values.strokeMm)} />
+              {ringValues !== null && (
+                <>
+                  <ValueRow term="Ring outer diameter" value={formatMm(ringValues.outerDiameterMm)} />
+                  <ValueRow term="Ring width" value={formatMm(ringValues.ringWidthMm)} />
+                  <ValueRow term="Gap width" value={formatMm(ringValues.gapWidthMm)} />
+                </>
+              )}
               <ValueRow
                 term="From the rounded label (standard Snellen geometry)"
                 value={labelGeometryText(values)}
@@ -532,7 +581,7 @@ export default function SizeCheckClient() {
               <textarea
                 readOnly
                 value={copyText}
-                rows={13}
+                rows={copyText.split("\n").length}
                 spellCheck={false}
                 className="w-full resize-y rounded border border-neutral-600 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
               />

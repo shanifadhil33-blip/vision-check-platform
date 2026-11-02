@@ -6,6 +6,7 @@
 
 import { pixelPitchMm } from "../calibration/pxPerMm";
 import { ARCMIN_TAN, letterHeightMmForLogMar, strokeWidthMmForLogMar } from "./logmar";
+import { landoltSizesMm, type LandoltSizesMm } from "./landoltShape";
 import { customerLabelForStep } from "./resultLabel";
 
 export const SIZE_CHECK_VERSION = "size-check-1";
@@ -16,7 +17,33 @@ export type SizeCheckDistanceMm = 2000 | 3000;
 /** Step shown first when it is drawable: 6/60. */
 export const SIZE_CHECK_DEFAULT_STEP_INDEX = 10;
 
-export type SizeCheckLetter = "H" | "Z";
+/** H and Z are drawn in the flanked triplet; landolt is one Landolt C, gap right. */
+export type SizeCheckLetter = "H" | "Z" | "landolt";
+
+export const SIZE_CHECK_LETTER_LABELS: Readonly<Record<SizeCheckLetter, string>> = {
+  H: "H",
+  Z: "Z",
+  landolt: "Landolt C",
+};
+
+const SIZE_CHECK_LETTER_INTRO =
+  "Shows one test size at a time, drawn exactly as in the test. Measure the middle letter with a ruler held flat against the screen.";
+const SIZE_CHECK_LANDOLT_INTRO = "Measure the C: its outer diameter, ring width and gap.";
+
+/** The intro line above the size check: the H and Z wording is unchanged, the C has its own. */
+export function sizeCheckIntro(letter: SizeCheckLetter): string {
+  return letter === "landolt" ? SIZE_CHECK_LANDOLT_INTRO : SIZE_CHECK_LETTER_INTRO;
+}
+
+/** The C test draws one C alone, so it uses the single fit; the letters use the triplet. */
+export function sizeCheckFormat(letter: SizeCheckLetter): "single" | "flanked-triplet" {
+  return letter === "landolt" ? "single" : "flanked-triplet";
+}
+
+/** Ring outer diameter = letter height; ring width = gap width = stroke. */
+export function sizeCheckRingValues(values: SizeValues, distanceMm: SizeCheckDistanceMm): LandoltSizesMm {
+  return landoltSizesMm(values.stepIndex, distanceMm);
+}
 
 export type SizeValues = {
   stepIndex: number;
@@ -178,6 +205,22 @@ export function labelGeometryText(values: SizeValues): string {
   return `height ${formatMm(values.labelHeightMm)}, stroke ${formatMm(values.labelStrokeMm)}`;
 }
 
+function ringLines(
+  letter: SizeCheckLetter,
+  values: SizeValues,
+  distanceMm: SizeCheckDistanceMm,
+): string[] {
+  if (letter !== "landolt") {
+    return [];
+  }
+  const ring = sizeCheckRingValues(values, distanceMm);
+  return [
+    `Ring outer diameter: ${formatMm(ring.outerDiameterMm)}`,
+    `Ring width: ${formatMm(ring.ringWidthMm)}`,
+    `Gap width: ${formatMm(ring.gapWidthMm)}`,
+  ];
+}
+
 /** Plain-text block for staff to paste. Lines joined with "\n", no trailing newline. */
 export function sizeCheckCopyText(input: {
   values: SizeValues;
@@ -203,10 +246,11 @@ export function sizeCheckCopyText(input: {
     `Date: ${input.dateIso}`,
     `Browser: ${input.userAgent}`,
     `Distance: ${distanceText(input.distanceMm)}`,
-    `Letter: ${input.letter}`,
+    `Letter: ${SIZE_CHECK_LETTER_LABELS[input.letter]}`,
     `Size: ${values.label}, logMAR ${formatLogMar(values.logMar)}`,
     `Expected letter height: ${formatMm(values.heightMm)}`,
     `Expected stroke width: ${formatMm(values.strokeMm)}`,
+    ...ringLines(input.letter, values, input.distanceMm),
     `From the rounded label: ${labelGeometryText(values)}`,
     drawnLine,
     `Screen pixel size: ${screenPixelSizeText(input.cssPxPerMm, input.devicePixelRatio)}`,

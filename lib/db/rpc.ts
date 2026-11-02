@@ -1,5 +1,7 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { calibrationForTestRecord, type Calibration } from "@/lib/calibration";
 import { getSupabaseBrowserClient } from "./client";
+import type { LandoltDatabase } from "./landoltTypes";
 import {
   classifyPostgrestFailure,
   classifyThrown,
@@ -8,15 +10,21 @@ import {
 } from "./errors";
 import {
   parseAnsweredTrials,
+  parseDirectionSubmitResult,
   parseSessionView,
   parseSubmitResult,
+  parseTestMode,
   parseVersionedStatus,
   type AnsweredTrial,
+  type DirectionChoice,
+  type DirectionSubmitResult,
+  type Eye,
   type PresentationPayload,
   type ResponseChoice,
   type SessionStatus,
   type SessionView,
   type SubmitResult,
+  type TestMode,
   type VersionedStatus,
 } from "./payloads";
 import type { Json } from "./types";
@@ -227,7 +235,7 @@ export async function appendEvent(args: {
 
 export async function upsertTestQuality(args: {
   sessionId: string;
-  eye: "both";
+  eye: Eye;
   quality: Json;
 }): Promise<RpcResult<string>> {
   return callRpc(
@@ -239,5 +247,64 @@ export async function upsertTestQuality(args: {
       }),
     parseUuid,
     "vcp_upsert_test_quality returned an unexpected shape",
+  );
+}
+
+/**
+ * The same browser client typed with the two Landolt C functions. Nothing new
+ * is created: it is the anon-key client from ./client under a wider type.
+ */
+function landoltClient(): SupabaseClient<LandoltDatabase> {
+  return getSupabaseBrowserClient() as unknown as SupabaseClient<LandoltDatabase>;
+}
+
+/** Allowed only while the session status is created. Called by the C page straight after create. */
+export async function setTestMode(args: {
+  sessionId: string;
+  testMode: TestMode;
+}): Promise<RpcResult<TestMode>> {
+  return callRpc(
+    () =>
+      landoltClient().rpc("vcp_set_test_mode", {
+        p_session_id: args.sessionId,
+        p_test_mode: args.testMode,
+      }),
+    parseTestMode,
+    "vcp_set_test_mode returned an unexpected shape",
+  );
+}
+
+export function directionResponseArgs(choice: DirectionChoice): {
+  responseKind: "direction" | "not_sure";
+  responseDirection: string | null;
+} {
+  if (choice.kind === "direction") {
+    return { responseKind: "direction", responseDirection: choice.direction };
+  }
+  return { responseKind: "not_sure", responseDirection: null };
+}
+
+export async function submitDirectionResponse(args: {
+  sessionId: string;
+  presentationId: string;
+  clientRequestId: string;
+  choice: DirectionChoice;
+  respondedAtIso: string;
+  latencyMs: number | null;
+}): Promise<RpcResult<DirectionSubmitResult>> {
+  const { responseKind, responseDirection } = directionResponseArgs(args.choice);
+  return callRpc(
+    () =>
+      landoltClient().rpc("vcp_submit_direction_response", {
+        p_session_id: args.sessionId,
+        p_presentation_id: args.presentationId,
+        p_client_request_id: args.clientRequestId,
+        p_response_kind: responseKind,
+        p_response_direction: responseDirection,
+        p_responded_at: args.respondedAtIso,
+        p_latency_ms: args.latencyMs,
+      }),
+    parseDirectionSubmitResult,
+    "vcp_submit_direction_response returned an unexpected shape",
   );
 }

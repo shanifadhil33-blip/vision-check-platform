@@ -211,6 +211,9 @@ function RemoteScreen({ sessionId, snap }: { sessionId: string | null; snap: Rem
         <p className="text-lg leading-relaxed text-neutral-200">
           {phoneLookAtScreen(snap.testMode)}
         </p>
+        {snap.testMode === "landolt" && snap.eyeLine !== null && (
+          <p className="text-lg font-bold leading-relaxed text-neutral-100">{snap.eyeLine}</p>
+        )}
         <StillWaitingLine show={snap.stillWaiting} />
       </main>
     );

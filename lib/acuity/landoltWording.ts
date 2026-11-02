@@ -18,6 +18,17 @@ export const EYE_LABELS: Readonly<Record<LandoltEye, string>> = {
   left: "Left eye",
   both: "Both eyes together",
 };
+const EYE_COVER_INSTRUCTIONS: Readonly<Record<LandoltEye, string>> = {
+  right: "Cover your left eye.",
+  left: "Cover your right eye.",
+  both: "Keep both eyes open.",
+};
+
+/** Said before the first C, on both screens: which eye to cover, or both open. */
+export function eyeCoverInstruction(eye: LandoltEye): string {
+  return EYE_COVER_INSTRUCTIONS[eye];
+}
+
 export const MSG_CHOOSE_EYE = "Choose which eye you’re testing, then press Start.";
 export const PRACTICE_LABEL = "Practice";
 

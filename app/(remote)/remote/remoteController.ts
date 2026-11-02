@@ -18,6 +18,7 @@ import {
 import * as sessionStore from "@/lib/session/sessionStore";
 import {
   choosingPatch,
+  phoneEyeLine,
   phoneSentLabel,
   respondedStateFor,
   testModeOf,
@@ -83,6 +84,8 @@ export type RemoteSnapshot = {
   testMode: PhoneTestMode;
   /** The C on screen is a practice C (Landolt C only). */
   practice: boolean;
+  /** Which eye to cover, from the C run; null for letters. */
+  eyeLine: string | null;
 };
 
 const POLL_MS = 3000;
@@ -106,6 +109,7 @@ const SERVER_SNAPSHOT: RemoteSnapshot = {
   distanceMmRequested: null,
   testMode: "letters",
   practice: false,
+  eyeLine: null,
 };
 
 const listeners = new Set<() => void>();
@@ -270,6 +274,14 @@ function followNextSession(nextSessionId: string): void {
   window.location.replace(`/remote?session=${nextSessionId}`);
 }
 
+/** Patches only on a change, so a letter state (always null) never adds a patch. */
+function patchEyeLine(state: AnyLoopState): void {
+  const eyeLine = phoneEyeLine(state);
+  if (eyeLine !== cachedSnapshot.eyeLine) {
+    patch({ eyeLine });
+  }
+}
+
 function applyLoopState(state: AnyLoopState | null, status: string | null): void {
   if (status === "abandoned") {
     showSessionEnded();
@@ -281,6 +293,7 @@ function applyLoopState(state: AnyLoopState | null, status: string | null): void
     if (testMode !== cachedSnapshot.testMode) {
       patch({ testMode });
     }
+    patchEyeLine(state);
   }
 
   if (status === "complete" || (state !== null && state.phase === "complete")) {
@@ -479,6 +492,9 @@ export async function bootstrap(sessionId: string): Promise<void> {
   const loadedState = parseAnyLoopState(loaded.data.currentState);
   if (loadedState !== null && testModeOf(loadedState) !== cachedSnapshot.testMode) {
     patch({ testMode: testModeOf(loadedState) });
+  }
+  if (loadedState !== null) {
+    patchEyeLine(loadedState);
   }
 
   if (loaded.data.status === "created") {

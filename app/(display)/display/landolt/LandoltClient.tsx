@@ -51,6 +51,7 @@ import {
   SIZE_TABLE_HEADINGS,
   START_ANOTHER_TEST,
   WAITING_FOR_PHONE,
+  eyeCoverInstruction,
   type LandoltEye,
 } from "@/lib/acuity/landoltWording";
 import type { RunContext } from "@/lib/session/loopState";
@@ -385,10 +386,15 @@ export default function LandoltClient() {
 
   if (snap.phase === "countdown") {
     return (
-      <main className="flex flex-1 items-center justify-center px-6">
+      <main className="flex flex-1 flex-col items-center justify-center gap-10 px-6">
         <p aria-live="polite" className="text-center text-9xl font-semibold text-neutral-100">
           {snap.countdownValue === null ? "" : `${snap.countdownValue}…`}
         </p>
+        {snap.eye !== null && (
+          <p className="text-center text-4xl font-semibold text-neutral-100">
+            {eyeCoverInstruction(snap.eye)}
+          </p>
+        )}
       </main>
     );
   }
@@ -570,6 +576,11 @@ export default function LandoltClient() {
                 <p className="text-2xl leading-relaxed text-neutral-100">
                   {mainGoToMark(snap.distanceMm ?? DEFAULT_TEST_DISTANCE_MM)}
                 </p>
+                {snap.eye !== null && (
+                  <p className="text-4xl font-semibold text-neutral-100">
+                    {eyeCoverInstruction(snap.eye)}
+                  </p>
+                )}
               </>
             )}
           </div>

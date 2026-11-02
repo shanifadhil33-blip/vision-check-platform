@@ -13,6 +13,7 @@ import {
   PHONE_C_WAITING_FIRST,
   PHONE_C_WAITING_NEXT,
   PHONE_NOT_SURE,
+  eyeCoverInstruction,
 } from "@/lib/acuity/landoltWording";
 import type { SloanLetter } from "@/lib/acuity/sloan";
 import type { AnyResponseChoice, ResponseChoice } from "@/lib/db/payloads";
@@ -89,6 +90,14 @@ export function phoneWaitingLine(testMode: PhoneTestMode, everSawTrial: boolean)
 
 export function phoneLookAtScreen(testMode: PhoneTestMode): string {
   return testMode === "landolt" ? PHONE_C_LOOK_AT_SCREEN : PHONE_LOOK_AT_SCREEN;
+}
+
+/**
+ * The cover-eye line for the at-mark screen, read from the C run's eye.
+ * Null for every letter state, so the letter screens show nothing new.
+ */
+export function phoneEyeLine(state: AnyLoopState): string | null {
+  return isLandoltState(state) ? eyeCoverInstruction(state.run.eye) : null;
 }
 
 export function phonePrompt(testMode: PhoneTestMode, practice: boolean): string {

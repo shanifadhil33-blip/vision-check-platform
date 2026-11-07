@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./.env*)",
+      "Edit(./.env*)",
+      "mcp__Supabase",
+      "mcp__Vercel",
+      "mcp__github",
+      "mcp__Netlify",
+      "mcp__Upwork",
+      "mcp__Gmail",
+      "mcp__Google_Drive"
+    ]
+  }
+}

@@ -89,3 +89,18 @@ Never run `20260926120000_vcp_calibrations_method_ruler_bar.rollback.sql` unless
 Never run `supabase/migrations/20261101120000_vcp_landolt.sql` (git record only).
 
 Never run `20261101120000_vcp_landolt.rollback.sql` unless told. It is emergency only: it drops the two new functions, restores `vcp_record_presentation` and `vcp_upsert_test_quality` and the three widened checks, drops the five new columns and deletes the tracking row. If any Landolt C data exists it raises and changes nothing.
+
+## Run order — 20261107120000_vcp_distance_readings
+
+1. Live-state check: read the live columns of `vcp.distance_events`, its four value checks, and the registered versions in `vcp.schema_migrations`. Continue only if they match the migration files and the latest registered version is `20261101120000_vcp_landolt`.
+2. Paste `20261107120000_vcp_distance_readings.preflight.sql`. Read the verdict. Continue only if it is `SAFE TO APPLY`.
+3. Paste `20261107120000_vcp_distance_readings.apply.sql`.
+4. Paste `20261107120000_vcp_distance_readings.verify.sql`. Read the verdict. Continue only if it is `MIGRATION VERIFIED`.
+5. Paste `20261107120000_vcp_distance_readings.smoketest.sql`. Read the verdict. Continue only if it is `SMOKE TEST PASSED` with cleanup PASS. It writes two test sessions to the live database and deletes both.
+6. Paste `fingerprint-rpc.sql`. Record the RPC baseline (expected to change: new function `vcp_record_distance_readings`).
+7. Paste `fingerprint.sql`. Record the table baseline (expected to change: new column `vcp.distance_events.captured_at`).
+8. Commit the migration files and the baseline entry on their own, with no app code.
+
+Never run `supabase/migrations/20261107120000_vcp_distance_readings.sql` (git record only).
+
+Never run `20261107120000_vcp_distance_readings.rollback.sql` unless told. It is emergency only: it drops `public.vcp_record_distance_readings(uuid, jsonb)`, drops the column `vcp.distance_events.captured_at` and deletes the tracking row. If any saved reading has `captured_at` set it raises and changes nothing.

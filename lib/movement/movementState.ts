@@ -18,14 +18,16 @@ import {
   letterHeightMmForDecision,
   type ScreenGeometry,
 } from "./decide";
-import { MOVEMENT_PARAMS, type MovementParams } from "./params";
+import { MAX_KEPT_ESTIMATES, MOVEMENT_PARAMS, type MovementParams } from "./params";
 
 export type MovementPhase = "tracking" | "paused-moved" | "paused-lost";
 
 export type MovementState = {
   phase: MovementPhase;
-  /** Latest estimates, oldest first, at most smoothingWindow long. */
+  /** Latest estimates, oldest first, trimmed to what the smoothing rule can use. */
   estimatesMm: number[];
+  /** When each estimate was taken, in ms, parallel to estimatesMm. */
+  estimateTimesMs: number[];
   lastReadingAtMs: number | null;
   /** While paused: consecutive readings in a row that would not pause. */
   goodReadingsInRow: number;
@@ -56,13 +58,39 @@ export type NextLetterPlan =
   | { kind: "pause"; reason: "moved" | "lost" };
 
 export function initialMovementState(): MovementState {
-  return { phase: "tracking", estimatesMm: [], lastReadingAtMs: null, goodReadingsInRow: 0 };
+  return {
+    phase: "tracking",
+    estimatesMm: [],
+    estimateTimesMs: [],
+    lastReadingAtMs: null,
+    goodReadingsInRow: 0,
+  };
+}
+
+/**
+ * How many of the latest estimates to keep after one taken at atMs:
+ * latest-count keeps N; time-window keeps those inside the window of the
+ * newest reading, never fewer than minReadings; never more than MAX_KEPT_ESTIMATES.
+ */
+function keptCount(timesMs: readonly number[], atMs: number, params: Readonly<MovementParams>): number {
+  const rule = params.smoothing;
+  if (rule.kind === "latest-count") {
+    return Math.min(rule.readings, MAX_KEPT_ESTIMATES);
+  }
+  let inWindow = 0;
+  for (const timeMs of timesMs) {
+    if (timeMs > atMs - rule.windowMs) {
+      inWindow += 1;
+    }
+  }
+  return Math.min(MAX_KEPT_ESTIMATES, Math.max(rule.minReadings, inWindow));
 }
 
 function decide(state: MovementState, nowMs: number, context: MovementContext): DistanceDecision {
   return decideDistance({
     confirmedDistanceMm: context.confirmedDistanceMm,
     estimatesMm: state.estimatesMm,
+    estimateTimesMs: state.estimateTimesMs,
     lastReadingAtMs: state.lastReadingAtMs,
     nowMs,
     stepIndex: context.stepIndex,
@@ -92,9 +120,13 @@ export function onDistanceReading(
   if (!Number.isFinite(reading.estimateMm) || reading.estimateMm <= 0) {
     return { state, action: { kind: "none" }, decision: decide(state, reading.atMs, context) };
   }
+  const estimatesMm = [...state.estimatesMm, reading.estimateMm];
+  const estimateTimesMs = [...state.estimateTimesMs, reading.atMs];
+  const keep = keptCount(estimateTimesMs, reading.atMs, params);
   const next: MovementState = {
     ...state,
-    estimatesMm: [...state.estimatesMm, reading.estimateMm].slice(-params.smoothingWindow),
+    estimatesMm: estimatesMm.slice(-keep),
+    estimateTimesMs: estimateTimesMs.slice(-keep),
     lastReadingAtMs: reading.atMs,
   };
   const decision = decide(next, reading.atMs, context);

@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { OptotypeCanvas } from "@/app/(display)/display/optotype/OptotypeCanvas";
 import { useCalibration } from "@/app/(display)/display/calibrate/useCalibration";
@@ -61,6 +61,9 @@ import {
   subscribe,
   watchSession,
 } from "./testController";
+
+/** Movement detection only. Fetched the first time a movement view is rendered, never with the switch off. */
+const MovementScreen = lazy(() => import("./movement/MovementScreens"));
 
 const CORRECTION_CHOICES = ["none", "contacts", "glasses"] as const satisfies readonly RunContext["correction"][];
 
@@ -377,14 +380,39 @@ export default function TestClient() {
     );
   }
 
-  if (snap.phase === "countdown") {
+  const movementDevicePixelRatio = snap.devicePixelRatio ?? calibration?.devicePixelRatio ?? 1;
+
+  if (snap.phase === "movement_hold" && snap.movement !== null) {
     return (
+      <Suspense fallback={null}>
+        <MovementScreen
+          kind="hold"
+          view={snap.movement}
+          devicePixelRatio={movementDevicePixelRatio}
+          distanceMm={snap.distanceMm ?? DEFAULT_TEST_DISTANCE_MM}
+        />
+      </Suspense>
+    );
+  }
+
+  if (snap.phase === "countdown") {
+    const countdownPage = (
       <main className="flex flex-1 items-center justify-center px-6">
         <p aria-live="polite" className="text-center text-9xl font-semibold text-neutral-100">
           {snap.countdownValue === null ? "" : `${snap.countdownValue}…`}
         </p>
       </main>
     );
+    if (snap.movement !== null) {
+      return (
+        <Suspense fallback={countdownPage}>
+          <MovementScreen kind="frame" view={snap.movement} devicePixelRatio={movementDevicePixelRatio}>
+            {countdownPage}
+          </MovementScreen>
+        </Suspense>
+      );
+    }
+    return countdownPage;
   }
 
   if (
@@ -401,6 +429,44 @@ export default function TestClient() {
         <main className="mx-auto flex w-full max-w-xl flex-1 flex-col gap-6 px-6 py-10">
           <p className="text-base text-neutral-300">Setting up…</p>
         </main>
+      );
+    }
+
+    if (snap.movement !== null && snap.movement.letterDistanceMm !== null) {
+      // Drawn at the same effective distance the controller saves for this letter.
+      const letterDistanceMm = snap.movement.letterDistanceMm;
+      const letter =
+        snap.format === "flanked-triplet" &&
+        snap.currentLeftFlanker !== null &&
+        snap.currentRightFlanker !== null ? (
+          <TripletCanvas
+            key={snap.currentTrialIndex ?? 0}
+            left={snap.currentLeftFlanker}
+            target={snap.currentTarget}
+            right={snap.currentRightFlanker}
+            logMar={logMar}
+            distanceMm={letterDistanceMm}
+            cssPxPerMm={cssPxPerMm}
+            devicePixelRatio={devicePixelRatio}
+            onMeasured={handleCanvasMeasured}
+          />
+        ) : (
+          <OptotypeCanvas
+            key={snap.currentTrialIndex ?? 0}
+            letter={snap.currentTarget}
+            logMar={logMar}
+            distanceMm={letterDistanceMm}
+            cssPxPerMm={cssPxPerMm}
+            devicePixelRatio={devicePixelRatio}
+            onMeasured={handleCanvasMeasured}
+          />
+        );
+      return (
+        <Suspense fallback={null}>
+          <MovementScreen kind="letter" view={snap.movement} devicePixelRatio={devicePixelRatio}>
+            {letter}
+          </MovementScreen>
+        </Suspense>
       );
     }
 
@@ -446,7 +512,7 @@ export default function TestClient() {
   const showCodeAgain =
     snap.phase === "ready" && codeAgainSessionId !== null && codeAgainSessionId === snap.sessionId;
 
-  return (
+  const page = (
     <main className="mx-auto flex w-full max-w-xl flex-1 flex-col gap-6 px-6 py-10">
       {snap.phase === "resuming" && (
         <p className="text-base text-neutral-300">Picking up where you left off…</p>
@@ -767,4 +833,15 @@ export default function TestClient() {
       )}
     </main>
   );
+
+  if (snap.movement !== null && snap.phase === "ready") {
+    return (
+      <Suspense fallback={page}>
+        <MovementScreen kind="frame" view={snap.movement} devicePixelRatio={movementDevicePixelRatio}>
+          {page}
+        </MovementScreen>
+      </Suspense>
+    );
+  }
+  return page;
 }

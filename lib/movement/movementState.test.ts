@@ -8,6 +8,16 @@ import {
   onDistanceReading,
   planNextLetter,
 } from "./movementState";
+import type { MovementParams } from "./params";
+
+/** The thresholds these worked values were written against, before the hand-held trial. */
+const OLD_PARAMS: MovementParams = {
+  deadbandFraction: 0.03,
+  maxResizeFraction: 0.25,
+  smoothing: { kind: "latest-count", readings: 5 },
+  lostAfterMs: 1500,
+  resumeAfterReadings: 3,
+};
 
 const LAPTOP: ScreenGeometry = {
   pixelPitchMm: 1 / (4.176 * 1.5),
@@ -18,7 +28,7 @@ const LAPTOP: ScreenGeometry = {
 };
 
 function context(letterOnScreen: boolean): MovementContext {
-  return { confirmedDistanceMm: 3000, stepIndex: 10, screen: LAPTOP, letterOnScreen };
+  return { confirmedDistanceMm: 3000, stepIndex: 10, screen: LAPTOP, letterOnScreen, params: OLD_PARAMS };
 }
 
 function feed(state: MovementState, estimatesMm: number[], letterOnScreen: boolean, startMs = 0) {
@@ -56,6 +66,7 @@ describe("resume", () => {
     const paused: MovementState = {
       phase: "paused-moved",
       estimatesMm: [],
+      estimateTimesMs: [],
       lastReadingAtMs: null,
       goodReadingsInRow: 0,
     };
@@ -74,6 +85,7 @@ describe("resume", () => {
     const almost: MovementState = {
       phase: "paused-moved",
       estimatesMm: [4000, 4000, 3010, 3010],
+      estimateTimesMs: [-300, -200, -100, 0],
       lastReadingAtMs: 0,
       goodReadingsInRow: 2,
     };
@@ -111,6 +123,7 @@ describe("during a letter", () => {
     const paused: MovementState = {
       phase: "paused-lost",
       estimatesMm: [3000],
+      estimateTimesMs: [0],
       lastReadingAtMs: 0,
       goodReadingsInRow: 0,
     };

@@ -9,6 +9,7 @@ import { PHONE_SESSION_ENDED } from "@/lib/acuity/flowWording";
 import type { SloanLetter } from "@/lib/acuity/sloan";
 import type { VcpError, VcpErrorKind } from "@/lib/db/errors";
 import { isDirectionChoice, type AnyResponseChoice } from "@/lib/db/payloads";
+import { movementSwitchOn } from "@/lib/movement/switch";
 import { joinSessionChannel, type SessionChannel } from "@/lib/session/channel";
 import {
   parseAnyLoopState,
@@ -24,6 +25,7 @@ import {
   testModeOf,
   type PhoneTestMode,
 } from "./remoteView";
+import type { PhoneMovement, PhoneMovementView } from "./movement/phoneMovement";
 
 type PhoneErrorContext = "answer" | "connect";
 
@@ -86,6 +88,8 @@ export type RemoteSnapshot = {
   practice: boolean;
   /** Which eye to cover, from the C run; null for letters. */
   eyeLine: string | null;
+  /** Movement detection only; null whenever the switch is off. */
+  movement: PhoneMovementView | null;
 };
 
 const POLL_MS = 3000;
@@ -110,6 +114,7 @@ const SERVER_SNAPSHOT: RemoteSnapshot = {
   testMode: "letters",
   practice: false,
   eyeLine: null,
+  movement: null,
 };
 
 const listeners = new Set<() => void>();
@@ -128,6 +133,8 @@ let lastHandledPresentationId: string | null = null;
 let followedNextSession = false;
 let stillWaitingTimer: ReturnType<typeof setTimeout> | null = null;
 let consecutiveFailedRefreshes = 0;
+/** Movement detection: null unless this phone's address has movement=1. */
+let phoneMovement: PhoneMovement | null = null;
 
 function emit(next: RemoteSnapshot): void {
   cachedSnapshot = next;
@@ -161,11 +168,15 @@ function patch(partial: Partial<RemoteSnapshot>): void {
     ...cachedSnapshot,
     ...partial,
   };
-  if (next.phase !== cachedSnapshot.phase) {
+  const phaseChanged = next.phase !== cachedSnapshot.phase;
+  if (phaseChanged) {
     next.stillWaiting = false;
     armStillWaiting(next.phase);
   }
   emit(next);
+  if (phaseChanged && phoneMovement !== null) {
+    phoneMovement.phaseChanged(next.phase);
+  }
 }
 
 function noteRefreshFailed(error: unknown): void {
@@ -271,7 +282,11 @@ function followNextSession(nextSessionId: string): void {
     return;
   }
   followedNextSession = true;
-  window.location.replace(`/remote?session=${nextSessionId}`);
+  window.location.replace(
+    movementSwitchOn(window.location.search)
+      ? `/remote?session=${nextSessionId}&movement=1`
+      : `/remote?session=${nextSessionId}`,
+  );
 }
 
 /** Patches only on a change, so a letter state (always null) never adds a patch. */
@@ -445,9 +460,11 @@ export function watchRemote(sessionId: string): void {
     return;
   }
   if (channel === null) {
-    channel = joinSessionChannel(sessionId, () => {
+    const onNudge = (): void => {
       void refreshFromServer();
-    });
+    };
+    channel =
+      phoneMovement !== null ? phoneMovement.joinChannel(sessionId, onNudge) : joinSessionChannel(sessionId, onNudge);
   }
   if (pollTimer === null) {
     pollTimer = setInterval(() => {
@@ -468,6 +485,12 @@ export async function bootstrap(sessionId: string): Promise<void> {
     errorMessage: null,
     choiceLocked: false,
   });
+  if (movementSwitchOn(window.location.search)) {
+    await startPhoneMovement(sessionId);
+    if (disposed) {
+      return;
+    }
+  }
 
   sessionStore.reset();
   const loaded = await sessionStore.loadSession(sessionId);
@@ -586,6 +609,8 @@ export async function confirmPosition(): Promise<void> {
   if (sessionId === null) {
     return;
   }
+  // Movement detection only: in the tap itself, so the camera prompt comes from it.
+  phoneMovement?.tapAtMark();
 
   positionInFlight = true;
   patch({ positionSending: true, positionFailed: false });
@@ -823,8 +848,46 @@ export async function retryFailed(): Promise<void> {
   await answer(entry.choice);
 }
 
+/**
+ * Movement detection only. Loads the camera code (never loaded with the
+ * switch off) and creates the phone's movement state for this session.
+ */
+async function startPhoneMovement(sessionId: string): Promise<void> {
+  if (phoneMovement !== null) {
+    return;
+  }
+  try {
+    const loaded = await import("./movement/phoneMovement");
+    if (disposed || phoneMovement !== null) {
+      return;
+    }
+    const created = loaded.createPhoneMovement({
+      sessionId,
+      onView: (view) => {
+        if (phoneMovement === created && !disposed) {
+          patch({ movement: view });
+        }
+      },
+    });
+    phoneMovement = created;
+    patch({ movement: created.view() });
+  } catch (error) {
+    // The test carries on without movement detection; the main screen stops waiting on its own.
+    console.error(error);
+  }
+}
+
+/** Movement detection only: the "Turn the camera back on" tap. */
+export function restartMovementCamera(): void {
+  phoneMovement?.restartFromButton();
+}
+
 export function disposeRemote(): void {
   disposed = true;
+  if (phoneMovement !== null) {
+    phoneMovement.dispose();
+    phoneMovement = null;
+  }
   stopPoll();
   leaveChannel();
   clearStillWaitingTimer();

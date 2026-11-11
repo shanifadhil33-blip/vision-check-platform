@@ -2,7 +2,8 @@
  * Turns distance estimates into a decision for one moment. Pure numbers in,
  * a decision out. No timers: the time comes in as an argument, in ms.
  *
- * D0 = the confirmed test distance. D = median of the latest estimates.
+ * D0 = the confirmed test distance. D = median of the latest estimates, as
+ * the smoothing rule in params picks them.
  * f = (D − D0) / D0. Decision order:
  *   1. lost: no estimate yet, or the latest is lostAfterMs old or older
  *   2. moved: |f| over maxResizeFraction
@@ -14,6 +15,9 @@
 import { letterHeightMmForLogMar } from "@/lib/acuity/logmar";
 import { computeTestLevels, type TestFormat } from "@/lib/acuity/testLevels";
 import { MOVEMENT_PARAMS, type MovementParams } from "./params";
+
+/** When each estimate was taken, in ms, parallel to the estimates. */
+export type EstimateTiming = { estimateTimesMs: readonly number[]; nowMs: number };
 
 /** The screen, as the existing level logic needs it. */
 export type ScreenGeometry = {
@@ -53,12 +57,44 @@ export function median(values: readonly number[]): number {
   return (sorted[middle - 1]! + sorted[middle]!) / 2;
 }
 
-/** D: the median of the last smoothingWindow estimates. */
+/**
+ * The estimates D is the median of. latest-count: the latest N. time-window:
+ * those taken after nowMs - windowMs and not after nowMs, or the latest
+ * minReadings when fewer; with no timing given, all of them.
+ */
+export function smoothingSampleMm(
+  estimatesMm: readonly number[],
+  params: Readonly<MovementParams> = MOVEMENT_PARAMS,
+  timing?: EstimateTiming,
+): number[] {
+  const rule = params.smoothing;
+  if (rule.kind === "latest-count") {
+    return estimatesMm.slice(-rule.readings);
+  }
+  if (timing === undefined || timing.estimateTimesMs.length !== estimatesMm.length) {
+    return [...estimatesMm];
+  }
+  const windowStartMs = timing.nowMs - rule.windowMs;
+  const inWindow: number[] = [];
+  for (let i = 0; i < estimatesMm.length; i += 1) {
+    const atMs = timing.estimateTimesMs[i]!;
+    if (atMs > windowStartMs && atMs <= timing.nowMs) {
+      inWindow.push(estimatesMm[i]!);
+    }
+  }
+  if (inWindow.length >= rule.minReadings) {
+    return inWindow;
+  }
+  return estimatesMm.slice(-rule.minReadings);
+}
+
+/** D: the median of the smoothing sample. */
 export function smoothedDistanceMm(
   estimatesMm: readonly number[],
   params: Readonly<MovementParams> = MOVEMENT_PARAMS,
+  timing?: EstimateTiming,
 ): number {
-  return median(estimatesMm.slice(-params.smoothingWindow));
+  return median(smoothingSampleMm(estimatesMm, params, timing));
 }
 
 /** f = (D − D0) / D0. Positive when the person is further away than the mark. */
@@ -93,6 +129,8 @@ export function isLevelDrawableAt(
 export function decideDistance(input: {
   confirmedDistanceMm: number;
   estimatesMm: readonly number[];
+  /** When each estimate was taken; needed by the time-window rule. */
+  estimateTimesMs?: readonly number[];
   lastReadingAtMs: number | null;
   nowMs: number;
   stepIndex: number;
@@ -108,7 +146,13 @@ export function decideDistance(input: {
     return { kind: "lost" };
   }
 
-  const smoothedMm = smoothedDistanceMm(input.estimatesMm, params);
+  const smoothedMm = smoothedDistanceMm(
+    input.estimatesMm,
+    params,
+    input.estimateTimesMs === undefined
+      ? undefined
+      : { estimateTimesMs: input.estimateTimesMs, nowMs: input.nowMs },
+  );
   const fraction = distanceFraction(smoothedMm, input.confirmedDistanceMm);
 
   if (Math.abs(fraction) > params.maxResizeFraction) {

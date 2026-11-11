@@ -1,5 +1,5 @@
 /**
- * Camera-image geometry for the camera spike. Pure numbers in, numbers out.
+ * Camera-image geometry for movement detection. Pure numbers in, numbers out.
  *
  * Coordinate convention: camera pixel (i, j) covers the square
  * [i, i + 1] x [j, j + 1], so its centre is at (i + 0.5, j + 0.5).

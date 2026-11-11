@@ -44,6 +44,7 @@ import { getAnsweredTrials, setSessionState as rpcSetSessionState } from "@/lib/
 import type { Json } from "@/lib/db/types";
 import type { OptotypeMeasurement } from "@/app/(display)/display/optotype/OptotypeCanvas";
 import { joinSessionChannel, type SessionChannel } from "@/lib/session/channel";
+import { movementSwitchOn } from "@/lib/movement/switch";
 import {
   awaitingResponseState,
   completeState,
@@ -62,6 +63,11 @@ import {
   stopVisibilityTracking,
 } from "./visibilityTracker";
 import { releaseScreenAwake, requestScreenAwake } from "./wakeLock";
+import type {
+  DisplayMovement,
+  DisplayMovementView,
+  LetterPlan,
+} from "./movement/displayMovement";
 
 export type TestPhase =
   | "idle"
@@ -72,6 +78,8 @@ export type TestPhase =
   | "countdown"
   | "presenting"
   | "awaiting_response"
+  /** Movement detection only: no letter, the movement hold screen is up. */
+  | "movement_hold"
   | "complete"
   | "stopped"
   | "error";
@@ -116,6 +124,8 @@ export type TestSnapshot = {
   errorDetail: string | null;
   countdownValue: number | null;
   stopReason: "calibration" | "zoom" | "window" | null;
+  /** Movement detection only; null whenever the switch is off. */
+  movement: DisplayMovementView | null;
 };
 
 type ActiveTrial = {
@@ -128,6 +138,10 @@ type ActiveTrial = {
   presentationId: string | null;
   recorded: boolean;
   voided: boolean;
+  /** Movement detection only: the effective distance this letter is drawn and saved at. */
+  letterDistanceMm?: number;
+  /** Movement detection only: the smoothed distance when this letter was planned. */
+  observedDistanceMm?: number;
 };
 
 type RememberedTrial = {
@@ -180,6 +194,7 @@ const SERVER_SNAPSHOT: TestSnapshot = {
   errorDetail: null,
   countdownValue: null,
   stopReason: null,
+  movement: null,
 };
 
 const listeners = new Set<() => void>();
@@ -227,6 +242,172 @@ type RememberedFinishedTest = {
 let rememberedFinishedTest: RememberedFinishedTest | null = null;
 let finishedScoredLetterCount: number | null = null;
 
+/** Movement detection: null unless the address has movement=1 and a session is open. */
+let movement: DisplayMovement | null = null;
+let movementModule: Promise<typeof import("./movement/displayMovement") | null> | null = null;
+
+/** Loads the movement code only when the switch is on; null when off or the load failed. */
+function loadMovementModule(): Promise<typeof import("./movement/displayMovement") | null> {
+  if (!movementSwitchOn(window.location.search)) {
+    return Promise.resolve(null);
+  }
+  movementModule ??= import("./movement/displayMovement").catch((error: unknown) => {
+    console.error(error);
+    movementModule = null;
+    return null;
+  });
+  return movementModule;
+}
+
+/** Stops the movement timers and drops it; pending readings are sent without waiting. */
+function releaseMovement(): void {
+  const current = movement;
+  if (current === null) {
+    return;
+  }
+  movement = null;
+  current.stop();
+  void current.flush();
+  if (cachedSnapshot.movement !== null) {
+    patch({ movement: null });
+  }
+}
+
+function appendMovementEvent(type: string, payload: Json): void {
+  void sessionStore.appendEvent({ type, payload }).then(
+    (logged) => {
+      if (!logged.ok) {
+        console.error(logged.error);
+      }
+    },
+    (error: unknown) => {
+      console.error(error);
+    },
+  );
+}
+
+/**
+ * Movement detection only. Creates the movement state for the session now in
+ * the store and logs movement_enabled. Does nothing when the switch is off.
+ */
+async function startMovementFor(
+  sessionId: string,
+  distanceMm: number,
+  format: SessionFormat,
+  viewportWidthCssPx: number,
+  viewportHeightCssPx: number,
+): Promise<void> {
+  const loaded = await loadMovementModule();
+  if (loaded === null || calibration === null) {
+    return;
+  }
+  releaseMovement();
+  const created = loaded.createDisplayMovement({
+    sessionId,
+    confirmedDistanceMm: distanceMm,
+    cssPxPerMm: calibration.cssPxPerMm,
+    devicePixelRatio: calibration.devicePixelRatio,
+    viewportWidthCssPx,
+    viewportHeightCssPx,
+    format,
+    initialStepIndex: staircase !== null && staircase.status === "running" ? staircase.currentStepIndex : null,
+    hooks: {
+      appendEvent: appendMovementEvent,
+      pauseLetter: (reason) => {
+        queueMovementWork(() => pauseLetterForMovement(reason));
+      },
+      resume: () => {
+        queueMovementWork(resumeAfterMovementHold);
+      },
+      viewChanged: (view) => {
+        if (movement === created) {
+          patch({ movement: view });
+        }
+      },
+    },
+  });
+  movement = created;
+  patch({ movement: created.view() });
+  appendMovementEvent("movement_enabled", created.enabledPayload());
+}
+
+/** Movement pauses and resumes share the visibility chain, so they never overlap a void or a fresh letter. */
+function queueMovementWork(work: () => Promise<void>): void {
+  const generation = visibilityGeneration;
+  visibilityChain = visibilityChain
+    .then(async () => {
+      if (generation !== visibilityGeneration || disposed || setupStopped) {
+        return;
+      }
+      await work();
+    })
+    .catch((error: unknown) => {
+      console.error(error);
+    });
+}
+
+function enterMovementHold(): void {
+  stopVisibilityTracking();
+  patch({
+    phase: "movement_hold",
+    currentTrialIndex: null,
+    currentStepIndex: null,
+    currentTarget: null,
+    currentLeftFlanker: null,
+    currentRightFlanker: null,
+    errorMessage: null,
+    errorDetail: null,
+    movement: movement?.view() ?? null,
+  });
+}
+
+/** A letter on screen while the person moved or the marker was lost: voided as on a hidden page, then the hold screen. */
+async function pauseLetterForMovement(reason: "moved" | "marker_lost"): Promise<void> {
+  if (disposed || setupStopped || movement === null) {
+    return;
+  }
+  const phase = cachedSnapshot.phase;
+  if (phase !== "presenting" && phase !== "awaiting_response") {
+    return;
+  }
+  const trial = activeTrial;
+  if (trial !== null && !trial.voided) {
+    if (!commitVoid(trial)) {
+      fail(MSG_SESSION_CANNOT_CONTINUE, "void_commit_failed");
+      return;
+    }
+    enterMovementHold();
+    await persistHiddenVoid(trial, reason);
+    return;
+  }
+  enterMovementHold();
+}
+
+/** The hold is over: a fresh letter at the same step, as after a hidden page. */
+async function resumeAfterMovementHold(): Promise<void> {
+  if (disposed || setupStopped || cachedSnapshot.phase !== "movement_hold") {
+    return;
+  }
+  await captureVoidedAnswerIfResponded();
+  if (disposed || setupStopped || cachedSnapshot.phase !== "movement_hold") {
+    return;
+  }
+  const outcome = evaluateSetup(cachedSnapshot.format);
+  if (outcome === null) {
+    console.error("setup probe is not registered");
+    return;
+  }
+  if (outcome !== "ok") {
+    await stopForSetup(outcome);
+    return;
+  }
+  if (staircase !== null && staircase.status === "finished") {
+    await finishRun();
+    return;
+  }
+  await presentNextLetter();
+}
+
 const SESSION_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -242,6 +423,10 @@ function testUrl(sessionId: string | null): string {
   const diag = new URLSearchParams(window.location.search).get("diag");
   if (diag !== null) {
     params.set("diag", diag);
+  }
+  const movementParam = new URLSearchParams(window.location.search).get("movement");
+  if (movementParam !== null) {
+    params.set("movement", movementParam);
   }
   const query = params.toString();
   return query === "" ? window.location.pathname : `${window.location.pathname}?${query}`;
@@ -600,7 +785,9 @@ async function buildRemotePairing(sessionId: string): Promise<{
   remoteUrl: string;
   qrDataUrl: string;
 }> {
-  const remoteUrl = `${window.location.origin}/remote?session=${sessionId}`;
+  const remoteUrl = movementSwitchOn(window.location.search)
+    ? `${window.location.origin}/remote?session=${sessionId}&movement=1`
+    : `${window.location.origin}/remote?session=${sessionId}`;
   const qrcode = await import("qrcode");
   const qrDataUrl = await qrcode.toDataURL(remoteUrl, { margin: 1, width: 280 });
   return { remoteUrl, qrDataUrl };
@@ -738,9 +925,14 @@ export function checkSetupNow(): void {
     phase !== "ready" &&
     phase !== "countdown" &&
     phase !== "presenting" &&
-    phase !== "awaiting_response"
+    phase !== "awaiting_response" &&
+    phase !== "movement_hold"
   ) {
     return;
+  }
+  if (movement !== null && setupProbe !== null) {
+    const probe = setupProbe();
+    movement.viewportChanged(probe.viewportWidthCssPx, probe.viewportHeightCssPx);
   }
   const outcome = evaluateSetup(cachedSnapshot.format);
   if (outcome === null || outcome === "ok") {
@@ -762,6 +954,7 @@ function leaveChannel(): void {
     channel.leave();
     channel = null;
   }
+  releaseMovement();
 }
 
 async function stopForSetup(reason: "calibration" | "zoom" | "window"): Promise<void> {
@@ -772,6 +965,9 @@ async function stopForSetup(reason: "calibration" | "zoom" | "window"): Promise<
   clearCountdown();
   visibilityGeneration += 1;
   const currentRun = run;
+  if (movement !== null) {
+    await movement.flush();
+  }
   if (currentRun !== null) {
     const eventResult = await sessionStore.appendEvent({
       type: "stopped_for_setup",
@@ -813,6 +1009,9 @@ async function closeOpenSession(
   runForState: RunContext | null = run,
 ): Promise<void> {
   try {
+    if (movement !== null) {
+      await movement.flush();
+    }
     const session = sessionStore.getSnapshot();
     if (
       session.sessionId !== null &&
@@ -1028,7 +1227,10 @@ async function rebuildHistoryFromAnsweredTrials(sessionId: string): Promise<{
   };
 }
 
-async function persistHiddenVoid(trial: ActiveTrial): Promise<void> {
+async function persistHiddenVoid(
+  trial: ActiveTrial,
+  reason: "page_hidden" | "moved" | "marker_lost" = "page_hidden",
+): Promise<void> {
   const generation = resumeGeneration;
   if (!voidEventSent.has(trial.trialIndex)) {
     voidEventSent.add(trial.trialIndex);
@@ -1037,7 +1239,7 @@ async function persistHiddenVoid(trial: ActiveTrial): Promise<void> {
       payload: {
         trial_index: trial.trialIndex,
         presentation_id: trial.presentationId,
-        reason: "page_hidden",
+        reason,
       },
     });
     if (!eventResult.ok) {
@@ -1171,6 +1373,11 @@ async function finishRun(): Promise<void> {
   const result = currentStaircase.result;
   const letterCount = scoredLetterCount(currentStaircase);
   finishedScoredLetterCount = letterCount;
+  const finishingMovement = movement;
+  if (finishingMovement !== null) {
+    finishingMovement.stop();
+    await finishingMovement.flush();
+  }
   const done = await writeState(
     "complete",
     completeState(letterCount, { run: currentRun, result }),
@@ -1193,13 +1400,15 @@ async function finishRun(): Promise<void> {
     return;
   }
   try {
+    const quality: Json = testQualityPayload({
+      result,
+      run: currentRun,
+      distanceMm,
+      notSureCount: currentNotSureCount(),
+    });
+    const observed = finishingMovement?.qualityExtras() ?? null;
     const qualityResult = await sessionStore.upsertTestQuality(
-      testQualityPayload({
-        result,
-        run: currentRun,
-        distanceMm,
-        notSureCount: currentNotSureCount(),
-      }),
+      observed === null ? quality : { ...(quality as { [key: string]: Json }), ...observed },
     );
     if (!qualityResult.ok) {
       console.error(qualityResult.error);
@@ -1348,6 +1557,10 @@ async function tryAdvanceFromResponded(): Promise<void> {
       letter: trial.target,
       outcome: correct ? "correct" : "incorrect",
     });
+    if (movement !== null) {
+      movement.letterScored(trial.observedDistanceMm);
+      movement.letterEnded();
+    }
     activeTrial = null;
     stopVisibilityTracking();
     patch({ history, notSureCount: currentNotSureCount() });
@@ -1438,9 +1651,11 @@ export function watchSession(sessionId: string): void {
     return;
   }
   if (channel === null) {
-    channel = joinSessionChannel(sessionId, () => {
+    const onNudge = (): void => {
       void onSessionNudgeOrPoll();
-    });
+    };
+    channel =
+      movement !== null ? movement.joinChannel(sessionId, onNudge) : joinSessionChannel(sessionId, onNudge);
   }
   if (pollTimer === null) {
     pollTimer = setInterval(() => {
@@ -1546,6 +1761,15 @@ async function presentNextLetter(): Promise<void> {
     return;
   }
 
+  let movementPlan: LetterPlan | null = null;
+  if (movement !== null) {
+    movementPlan = movement.planLetter(current.currentStepIndex);
+    if (movementPlan.kind === "hold") {
+      enterMovementHold();
+      return;
+    }
+  }
+
   const target = pickNextTarget(current, Math.random);
   const choices = buildTrialChoices(target, Math.random);
   let leftFlanker: SloanLetter | null = null;
@@ -1569,6 +1793,13 @@ async function presentNextLetter(): Promise<void> {
     recorded: false,
     voided: false,
   };
+  if (movement !== null && movementPlan !== null && movementPlan.kind === "show") {
+    // One value for the drawing (snapshot) and the saved sizes (activeTrial).
+    activeTrial.letterDistanceMm = movementPlan.effectiveDistanceMm;
+    activeTrial.observedDistanceMm = movementPlan.observedDistanceMm;
+    movement.letterShown(movementPlan);
+    patch({ movement: movement.view() });
+  }
 
   startVisibilityTracking(trialIndex, queueVisibility);
 
@@ -1629,7 +1860,8 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
       return;
     }
 
-    const distanceMm = cachedSnapshot.distanceMm;
+    const confirmedDistanceMm = cachedSnapshot.distanceMm;
+    const distanceMm = trial.letterDistanceMm ?? confirmedDistanceMm;
     const logMar = trial.stepIndex / 10;
     const letterHeightMm = letterHeightMmForLogMar(logMar, distanceMm);
     const strokeWidthMm = strokeWidthMmForLogMar(logMar, distanceMm);
@@ -1654,7 +1886,7 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
         trial.leftFlanker !== null && trial.rightFlanker !== null
           ? "flanked-triplet"
           : "single",
-      distance_mm_requested: distanceMm,
+      distance_mm_requested: confirmedDistanceMm,
       actual_letter_height_device_px: measurement.inkBounds.heightPx,
       rendered_at: new Date().toISOString(),
       visibility_confirmed: document.visibilityState === "visible",
@@ -1675,6 +1907,10 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
 
     if (trial.target === "H" && measurement.strokeWidthDevicePx !== null) {
       payload.actual_stroke_width_device_px = measurement.strokeWidthDevicePx;
+    }
+
+    if (trial.observedDistanceMm !== undefined) {
+      payload.distance_mm_observed = trial.observedDistanceMm;
     }
 
     if (document.visibilityState === "hidden" && !commitVoid(trial)) {
@@ -1736,6 +1972,7 @@ async function acceptMeasurement(measurement: OptotypeMeasurement): Promise<void
     }
 
     setVisibilityPresentationId(recorded.data);
+    movement?.letterRecorded(recorded.data);
 
     const eventResult = await sessionStore.appendEvent({
       type: "choices_offered",
@@ -2114,6 +2351,9 @@ export async function start(
     }
 
     const sessionId = created.data.id;
+    if (movementSwitchOn(window.location.search)) {
+      await startMovementFor(sessionId, distanceMm, format, viewportWidthCssPx, viewportHeightCssPx);
+    }
     await handOverFinishedTest(sessionId);
     setSessionIdInUrl(sessionId);
     const pairing = await buildRemotePairing(sessionId);
@@ -2252,6 +2492,12 @@ export async function resume(
     if (disposed || generation !== resumeGeneration) {
       return;
     }
+    if (movementSwitchOn(window.location.search) && view.status !== "complete") {
+      await startMovementFor(view.id, distanceMm, format, viewportWidthCssPx, viewportHeightCssPx);
+      if (disposed || generation !== resumeGeneration) {
+        return;
+      }
+    }
 
     if (view.status === "created" || view.status === "paired") {
       if (loopState === null || loopState.run === null) {
@@ -2386,6 +2632,9 @@ export async function resume(
     };
     staircase = replay.staircase;
     nextTrialIndex = replay.nextTrialIndex;
+    if (movement !== null && staircase.status === "running") {
+      movement.setStepIndex(staircase.currentStepIndex);
+    }
     history = withVoidedFlags(rebuilt.history, run.voidedTrialIndices);
 
     const newlyVoided = replay.voidedTrialIndices.filter(

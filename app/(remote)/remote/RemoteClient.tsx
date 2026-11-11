@@ -20,6 +20,14 @@ import {
   PHONE_TRY_AGAIN,
 } from "@/lib/acuity/flowWording";
 import type { SloanLetter } from "@/lib/acuity/sloan";
+import {
+  PHONE_CAMERA_NOTICE,
+  PHONE_CAMERA_RESTART_BUTTON,
+  PHONE_CAMERA_UNAVAILABLE,
+  PHONE_HOLD_INSTRUCTION,
+  PHONE_STATUS_GO_BACK,
+  PHONE_STATUS_LOST,
+} from "@/lib/movement/wording";
 import { useSessionStore } from "@/lib/session/useSessionStore";
 import { phoneLookAtScreen, phonePrompt, phoneWaitingLine } from "./remoteView";
 import {
@@ -29,6 +37,7 @@ import {
   disposeRemote,
   getServerSnapshot,
   getSnapshot,
+  restartMovementCamera,
   retryFailed,
   subscribe,
   watchRemote,
@@ -85,6 +94,49 @@ const DIRECTION_CELLS: readonly { direction: LandoltDirection; cell: string }[] 
   { direction: "down", cell: "col-start-2 row-start-3" },
 ];
 
+/** Phases after the tap in which the phone's own camera status is shown. */
+const MOVEMENT_STATUS_PHASES: ReadonlySet<string> = new Set(["at_mark", "waiting", "choosing", "sent", "send_failed"]);
+
+/** Movement detection only: the phone's camera status. Renders nothing with the switch off. */
+function MovementStatus({ snap }: { snap: RemoteSnapshot }) {
+  if (snap.movement === null || !MOVEMENT_STATUS_PHASES.has(snap.phase)) {
+    return null;
+  }
+  const status = snap.movement.status;
+  if (status === "needs-restart") {
+    return (
+      <div className="px-4 pt-2">
+        <button
+          type="button"
+          onClick={() => {
+            restartMovementCamera();
+          }}
+          className="min-h-14 w-full rounded-lg bg-amber-600 px-6 text-lg font-medium text-white hover:bg-amber-500 active:bg-amber-400"
+        >
+          {PHONE_CAMERA_RESTART_BUTTON}
+        </button>
+      </div>
+    );
+  }
+  let line: string | null = null;
+  if (status === "lost") {
+    line = PHONE_STATUS_LOST;
+  } else if (status === "go-back") {
+    line = PHONE_STATUS_GO_BACK;
+  } else if (status === "unavailable") {
+    line = PHONE_CAMERA_UNAVAILABLE;
+  }
+  return (
+    <p
+      role="status"
+      aria-live="polite"
+      className={`min-h-7 px-4 pt-2 text-center text-lg font-medium ${status === "unavailable" ? "text-neutral-300" : "text-amber-300"}`}
+    >
+      {line ?? ""}
+    </p>
+  );
+}
+
 function StillWaitingLine({ show }: { show: boolean }) {
   return (
     <p className="min-h-6 text-neutral-400" aria-live="polite">
@@ -120,6 +172,7 @@ export default function RemoteClient({ sessionId }: Props) {
       <p role="status" className="min-h-5 px-4 pt-3 text-center text-sm text-neutral-400">
         {snap.reconnecting ? PHONE_RECONNECTING : ""}
       </p>
+      <MovementStatus snap={snap} />
       <RemoteScreen sessionId={sessionId} snap={snap} />
     </>
   );
@@ -184,6 +237,9 @@ function RemoteScreen({ sessionId, snap }: { sessionId: string | null; snap: Rem
         <p className="text-lg leading-relaxed text-neutral-200">
           {phoneGoToMark(snap.distanceMmRequested)}
         </p>
+        {snap.movement !== null && (
+          <p className="text-lg leading-relaxed text-neutral-200">{PHONE_HOLD_INSTRUCTION}</p>
+        )}
         <div className="flex w-full max-w-sm flex-col gap-2">
           <button
             type="button"
@@ -196,6 +252,9 @@ function RemoteScreen({ sessionId, snap }: { sessionId: string | null; snap: Rem
           >
             {snap.positionSending ? PHONE_SENDING : PHONE_AT_MARK_BUTTON}
           </button>
+          {snap.movement !== null && (
+            <p className="text-base leading-relaxed text-neutral-300">{PHONE_CAMERA_NOTICE}</p>
+          )}
           <p className="min-h-12 text-red-400" aria-live="polite">
             {snap.positionFailed ? PHONE_POSITION_FAILED : ""}
           </p>

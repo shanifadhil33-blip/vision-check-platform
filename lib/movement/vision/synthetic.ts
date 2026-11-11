@@ -1,5 +1,5 @@
 /**
- * Synthetic camera frames for the spike's unit tests: exact box-filter
+ * Synthetic camera frames for the movement vision unit tests: exact box-filter
  * anti-aliasing of axis-aligned rectangles on white, plus seeded Gaussian
  * noise. Camera pixel (i, j) covers [i, i + 1] x [j, j + 1].
  */

@@ -61,3 +61,76 @@ export function joinSessionChannel(
     },
   };
 }
+
+export type SessionChannelWithBroadcasts = SessionChannel & {
+  /** Sends one broadcast event. False when not subscribed yet, left, or the send failed. */
+  sendBroadcast: (event: string, payload: { [key: string]: unknown }) => Promise<boolean>;
+};
+
+/**
+ * Movement detection only. The same public channel and nudge as
+ * joinSessionChannel, plus listeners for the named broadcast events,
+ * registered before subscribe, and a sender for them. Payloads reach
+ * onBroadcast unchecked; the caller parses them.
+ */
+export function joinSessionChannelWithBroadcasts(
+  sessionId: string,
+  onNudge: () => void,
+  events: readonly string[],
+  onBroadcast: (event: string, payload: unknown) => void,
+): SessionChannelWithBroadcasts {
+  const supabase = getSupabaseBrowserClient();
+  let subscribed = false;
+  let left = false;
+
+  const channel: RealtimeChannel = supabase.channel(sessionId, {
+    config: {
+      private: false,
+      broadcast: { self: false, ack: false },
+    },
+  });
+
+  channel.on("broadcast", { event: NUDGE_EVENT }, () => {
+    if (!left) {
+      onNudge();
+    }
+  });
+
+  for (const event of events) {
+    channel.on("broadcast", { event }, (message: { payload?: unknown }) => {
+      if (!left) {
+        onBroadcast(event, message.payload);
+      }
+    });
+  }
+
+  channel.subscribe((status) => {
+    if (status === REALTIME_SUBSCRIBE_STATES.SUBSCRIBED) {
+      subscribed = true;
+    }
+  });
+
+  async function send(event: string, payload: { [key: string]: unknown }): Promise<boolean> {
+    if (left || !subscribed) {
+      return false;
+    }
+    try {
+      const result = await channel.send({ type: "broadcast", event, payload });
+      return result === "ok";
+    } catch {
+      return false;
+    }
+  }
+
+  return {
+    sendNudge(kind: string): Promise<boolean> {
+      return send(NUDGE_EVENT, { kind });
+    },
+    sendBroadcast: send,
+    leave(): void {
+      left = true;
+      subscribed = false;
+      void supabase.removeChannel(channel);
+    },
+  };
+}

@@ -43,7 +43,14 @@ export type RefinedQuad = {
 
 const PROFILE_STEP_CAMERA_PX = 0.25;
 const MIN_SEARCH_RADIUS_CAMERA_PX = 2;
-const SEARCH_RADIUS_CELL_FRACTION = 0.6;
+/** Into the marker: its black border is a full cell wide. */
+const INWARD_SEARCH_CELL_FRACTION = 0.6;
+/**
+ * Out of the marker: the main screen's 24 CSS px right margin can leave as
+ * little as 0.46 of a cell of white before a dark bezel, so the window must
+ * stop short of that.
+ */
+const OUTWARD_SEARCH_CELL_FRACTION = 0.3;
 const SIDE_MARGIN_FRACTION = 0.12;
 const MIN_EDGE_POINTS = 5;
 const MAX_EDGE_POINTS = 200;
@@ -74,18 +81,21 @@ export function sampleGrey(image: GreyImage, xCameraPx: number, yCameraPx: numbe
 /**
  * Edge offset along the outward normal, in camera px, from the centre of one
  * cross-edge profile: the gradient-weighted mean position of the dark-to-light
- * step. Null when no clear step is inside the window.
+ * step. The window runs inwardRadius into the marker and outwardRadius out of
+ * it. Null when no clear step is inside the window.
  */
 export function edgeOffsetCameraPx(
   image: GreyImage,
   centre: CameraPoint,
   normalX: number,
   normalY: number,
-  searchRadiusCameraPx: number,
+  inwardRadiusCameraPx: number,
+  outwardRadiusCameraPx: number = inwardRadiusCameraPx,
 ): number | null {
-  const steps = Math.round(searchRadiusCameraPx / PROFILE_STEP_CAMERA_PX);
+  const inwardSteps = Math.round(inwardRadiusCameraPx / PROFILE_STEP_CAMERA_PX);
+  const outwardSteps = Math.round(outwardRadiusCameraPx / PROFILE_STEP_CAMERA_PX);
   const values: number[] = [];
-  for (let i = -steps - 1; i <= steps + 1; i += 1) {
+  for (let i = -inwardSteps - 1; i <= outwardSteps + 1; i += 1) {
     const offsetCameraPx = i * PROFILE_STEP_CAMERA_PX;
     const value = sampleGrey(
       image,
@@ -106,7 +116,7 @@ export function edgeOffsetCameraPx(
   for (let i = 1; i < values.length - 1; i += 1) {
     const gradient =
       ((values[i + 1] ?? 0) - (values[i - 1] ?? 0)) / (2 * PROFILE_STEP_CAMERA_PX);
-    const offsetCameraPx = (i - 1 - steps) * PROFILE_STEP_CAMERA_PX;
+    const offsetCameraPx = (i - 1 - inwardSteps) * PROFILE_STEP_CAMERA_PX;
     weightSum += gradient;
     weightedOffsetSum += gradient * offsetCameraPx;
   }
@@ -115,7 +125,7 @@ export function edgeOffsetCameraPx(
     return null;
   }
   const offsetCameraPx = weightedOffsetSum / weightSum;
-  if (Math.abs(offsetCameraPx) > searchRadiusCameraPx) {
+  if (offsetCameraPx < -inwardRadiusCameraPx || offsetCameraPx > outwardRadiusCameraPx) {
     return null;
   }
   return offsetCameraPx;
@@ -146,9 +156,13 @@ export function refineQuad(
     const meanSideCameraPx =
       sideLengthsCameraPx(corners).reduce((sum, length) => sum + length, 0) / 4;
     const cellCameraPx = meanSideCameraPx / options.cellsAcross;
-    const searchRadiusCameraPx = Math.max(
+    const inwardRadiusCameraPx = Math.max(
       MIN_SEARCH_RADIUS_CAMERA_PX,
-      SEARCH_RADIUS_CELL_FRACTION * cellCameraPx,
+      INWARD_SEARCH_CELL_FRACTION * cellCameraPx,
+    );
+    const outwardRadiusCameraPx = Math.max(
+      MIN_SEARCH_RADIUS_CAMERA_PX,
+      OUTWARD_SEARCH_CELL_FRACTION * cellCameraPx,
     );
 
     const lines: CameraLine[] = [];
@@ -191,7 +205,8 @@ export function refineQuad(
           centre,
           normalX,
           normalY,
-          searchRadiusCameraPx,
+          inwardRadiusCameraPx,
+          outwardRadiusCameraPx,
         );
         if (offsetCameraPx === null) {
           continue;

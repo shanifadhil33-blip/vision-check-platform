@@ -1,6 +1,6 @@
 /**
  * Hand-written types for js-aruco2 2.0.0 (CommonJS, no bundled types).
- * Only the parts the camera spike uses. Corner coordinates are integer pixel
+ * Only the parts movement detection uses. Corner coordinates are integer pixel
  * indices of the image passed to detect().
  */
 declare module "js-aruco2" {

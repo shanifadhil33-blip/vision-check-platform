@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { quadCentre } from "./geometry";
-import { createMarkerDetector, CENTRE_MARKER_ID, MARKER_CELLS_ACROSS } from "./markers";
+import { createMarkerDetector, MARKER_CELLS_ACROSS, MOVEMENT_MARKER_ID } from "./markers";
 import { refineQuad } from "./refine";
-import { singleMarkerSizeCameraPx } from "./sizeMetrics";
+import { singleMarkerSizeCameraPx } from "./markerSize";
 import { greyToRgba, markerRects, renderGrey } from "./synthetic";
 
 /**
@@ -66,12 +66,17 @@ describe("js-aruco2 plus refinement on a synthetic marker", () => {
     const image = renderGrey({
       widthCameraPx: 120,
       heightCameraPx: 110,
-      ...markerRects(CENTRE_MARKER_ID, leftCameraPx, topCameraPx, cellCameraPx),
+      ...markerRects(MOVEMENT_MARKER_ID, leftCameraPx, topCameraPx, cellCameraPx),
       noiseSigmaGrey: 2,
       seed: 7,
     });
-    const found = createMarkerDetector().detect(greyToRgba(image), 120, 110, 1, 1);
-    const marker = found.find((candidate) => candidate.markerId === CENTRE_MARKER_ID);
+    const found = createMarkerDetector().detect(greyToRgba(image), 120, 110, {
+      scaleX: 1,
+      scaleY: 1,
+      originXCameraPx: 0,
+      originYCameraPx: 0,
+    });
+    const marker = found.find((candidate) => candidate.markerId === MOVEMENT_MARKER_ID);
     expect(marker).toBeDefined();
 
     const refined = refineQuad(image, marker!.rawCorners, { cellsAcross: MARKER_CELLS_ACROSS });

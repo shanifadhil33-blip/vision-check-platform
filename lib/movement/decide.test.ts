@@ -7,6 +7,16 @@ import {
   median,
   type ScreenGeometry,
 } from "./decide";
+import type { MovementParams } from "./params";
+
+/** The thresholds these worked values were written against, before the hand-held trial. */
+const OLD_PARAMS: MovementParams = {
+  deadbandFraction: 0.03,
+  maxResizeFraction: 0.25,
+  smoothing: { kind: "latest-count", readings: 5 },
+  lostAfterMs: 1500,
+  resumeAfterReadings: 3,
+};
 
 /** A 1920 x 1080 laptop at DPR 1.5 with 4.176 CSS px per mm, maximised Chrome. */
 const LAPTOP: ScreenGeometry = {
@@ -29,6 +39,7 @@ function decideAt(confirmedDistanceMm: number, smoothedMm: number, stepIndex: nu
     nowMs: 100,
     stepIndex,
     screen,
+    params: OLD_PARAMS,
   });
 }
 
@@ -99,6 +110,7 @@ describe("smoothing", () => {
       nowMs: 10,
       stepIndex: STEP_6_60,
       screen: LAPTOP,
+      params: OLD_PARAMS,
     });
     expect(decision).toMatchObject({ kind: "keep", smoothedDistanceMm: 3005 });
   });

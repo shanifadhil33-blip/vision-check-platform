@@ -1,7 +1,8 @@
 /**
- * The three broadcasts the phone sends on the session channel, and the
- * main screen's checks on what arrives. Pure: payloads in, payloads out.
- * Broadcasts are not stored and may be lost or arrive out of order.
+ * The three broadcasts the phone sends on the session channel, the one the
+ * main screen sends back (marker_visibility), and the receiving side's checks
+ * on what arrives. Pure: payloads in, payloads out. Broadcasts are not stored
+ * and may be lost or arrive out of order.
  */
 
 export const DISTANCE_EVENT = "distance";
@@ -13,6 +14,12 @@ export const MOVEMENT_BROADCAST_EVENTS = [
   DISTANCE_BASELINE_EVENT,
   DISTANCE_UNAVAILABLE_EVENT,
 ] as const;
+
+/** Main screen to phone: the marker was hidden on purpose, or is back. */
+export const MARKER_VISIBILITY_EVENT = "marker_visibility";
+
+/** What the phone listens for. */
+export const PHONE_BROADCAST_EVENTS = [MARKER_VISIBILITY_EVENT] as const;
 
 export type DistanceBroadcast = {
   seq: number;
@@ -138,4 +145,47 @@ export function receiveDistance(
     return { stream, reading: null };
   }
   return { stream: { lastSeq: reading.seq }, reading };
+}
+
+export type MarkerVisibilityBroadcast = { visible: boolean; seq: number };
+
+export function markerVisibilityBroadcast(input: { visible: boolean; seq: number }): MarkerVisibilityBroadcast {
+  return { visible: input.visible, seq: input.seq };
+}
+
+/** Null for anything that is not exactly a marker_visibility broadcast. */
+export function parseMarkerVisibilityBroadcast(value: unknown): MarkerVisibilityBroadcast | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const { visible, seq } = value;
+  if (typeof visible !== "boolean" || typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 0) {
+    return null;
+  }
+  return { visible, seq };
+}
+
+/** The phone's memory of the marker_visibility stream: the highest sequence number taken. */
+export type MarkerVisibilityStream = { lastSeq: number | null };
+
+export function initialMarkerVisibilityStream(): MarkerVisibilityStream {
+  return { lastSeq: null };
+}
+
+/**
+ * Takes one raw marker_visibility payload. A malformed payload, or one whose
+ * seq is not above every seq taken so far (late, repeated), is ignored.
+ */
+export function receiveMarkerVisibility(
+  stream: MarkerVisibilityStream,
+  raw: unknown,
+): { stream: MarkerVisibilityStream; visibility: MarkerVisibilityBroadcast | null } {
+  const visibility = parseMarkerVisibilityBroadcast(raw);
+  if (visibility === null) {
+    return { stream, visibility: null };
+  }
+  if (stream.lastSeq !== null && visibility.seq <= stream.lastSeq) {
+    return { stream, visibility: null };
+  }
+  return { stream: { lastSeq: visibility.seq }, visibility };
 }

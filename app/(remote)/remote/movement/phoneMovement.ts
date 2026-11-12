@@ -14,6 +14,11 @@ import {
   DISTANCE_EVENT,
   DISTANCE_UNAVAILABLE_EVENT,
   distanceBroadcast,
+  initialMarkerVisibilityStream,
+  MARKER_VISIBILITY_EVENT,
+  type MarkerVisibilityStream,
+  PHONE_BROADCAST_EVENTS,
+  receiveMarkerVisibility,
   type UnavailableReason,
 } from "@/lib/movement/broadcast";
 import {
@@ -136,6 +141,11 @@ export function createPhoneMovement(input: {
   let startGeneration = 0;
   let disposed = false;
   let lastView: PhoneMovementStatusView | null = null;
+  let markerVisibility: MarkerVisibilityStream = initialMarkerVisibilityStream();
+  /** The main screen hid the marker on purpose (a letter between letters); when heard. */
+  let markerHiddenAtMs: number | null = null;
+  /** The main screen put the hidden marker back; when heard. */
+  let markerShownAtMs: number | null = null;
 
   const tickHandle = deps.setInterval(() => tick(), TICK_MS);
   const removeVisibilityListener = deps.addVisibilityListener(onVisibilityChange);
@@ -153,7 +163,7 @@ export function createPhoneMovement(input: {
     if (!camera.running) {
       return "starting";
     }
-    return phoneMovementStatus({ nowMs: deps.nowMs(), lastFoundAtMs, latestRatio });
+    return phoneMovementStatus({ nowMs: deps.nowMs(), lastFoundAtMs, latestRatio, markerHiddenAtMs, markerShownAtMs });
   }
 
   function emitView(): void {
@@ -169,6 +179,27 @@ export function createPhoneMovement(input: {
       return;
     }
     void channel.sendBroadcast(event, payload).catch(() => false);
+  }
+
+  function onBroadcast(event: string, raw: unknown): void {
+    if (disposed || event !== MARKER_VISIBILITY_EVENT) {
+      return;
+    }
+    const received = receiveMarkerVisibility(markerVisibility, raw);
+    markerVisibility = received.stream;
+    const visibility = received.visibility;
+    if (visibility === null) {
+      return;
+    }
+    if (!visibility.visible) {
+      // Each hide is sent once, so a new one restarts the 10 s limit even if the last "back" was lost.
+      markerHiddenAtMs = deps.nowMs();
+      markerShownAtMs = null;
+    } else if (markerHiddenAtMs !== null) {
+      markerHiddenAtMs = null;
+      markerShownAtMs = deps.nowMs();
+    }
+    emitView();
   }
 
   function readStoredBaseline(): StoredBaseline | null {
@@ -428,7 +459,7 @@ export function createPhoneMovement(input: {
 
   return {
     joinChannel(sessionId, onNudge) {
-      const joined = deps.joinChannel(sessionId, onNudge, [], () => undefined);
+      const joined = deps.joinChannel(sessionId, onNudge, PHONE_BROADCAST_EVENTS, onBroadcast);
       channel = joined;
       return {
         sendNudge: (kind) => joined.sendNudge(kind),

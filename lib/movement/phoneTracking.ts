@@ -20,6 +20,12 @@ export const BASELINE_TIMEOUT_MS = 20_000;
 export const MIN_SEND_INTERVAL_MS = 250;
 /** The baseline and an unavailable notice are sent again this often, in case one is lost. */
 export const RESEND_INTERVAL_MS = 5000;
+/**
+ * The main screen said the marker is hidden on purpose: the phone stays quiet
+ * for less than this long after hearing it, and from this age on ignores the
+ * flag, so a lost "marker is back" broadcast cannot hide a real problem.
+ */
+export const MARKER_HIDDEN_MAX_MS = 10_000;
 
 export type Baseline = { baselinePx: number; frames: number };
 
@@ -45,8 +51,21 @@ export function phoneMovementStatus(input: {
   nowMs: number;
   lastFoundAtMs: number | null;
   latestRatio: number | null;
+  /** When the phone heard the marker is hidden on purpose; null when it is not hidden. */
+  markerHiddenAtMs?: number | null;
+  /** When the phone heard the hidden marker is back; the lost clock restarts there. */
+  markerShownAtMs?: number | null;
 }): PhoneMovementStatus {
-  if (input.lastFoundAtMs === null || input.nowMs - input.lastFoundAtMs >= PHONE_LOST_AFTER_MS) {
+  const hiddenAtMs = input.markerHiddenAtMs ?? null;
+  if (hiddenAtMs !== null && input.nowMs - hiddenAtMs < MARKER_HIDDEN_MAX_MS) {
+    return "ok";
+  }
+  const shownAtMs = input.markerShownAtMs ?? null;
+  const lastSeenAtMs =
+    shownAtMs === null
+      ? input.lastFoundAtMs
+      : Math.max(shownAtMs, input.lastFoundAtMs ?? Number.NEGATIVE_INFINITY);
+  if (lastSeenAtMs === null || input.nowMs - lastSeenAtMs >= PHONE_LOST_AFTER_MS) {
     return "lost";
   }
   if (input.latestRatio !== null && Math.abs(input.latestRatio - 1) > PHONE_GO_BACK_FRACTION) {

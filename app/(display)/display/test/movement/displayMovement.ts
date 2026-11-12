@@ -17,6 +17,8 @@ import { type DistanceReading, recordDistanceReadings } from "@/lib/db/distanceR
 import type { Json } from "@/lib/db/types";
 import {
   initialDistanceStream,
+  MARKER_VISIBILITY_EVENT,
+  markerVisibilityBroadcast,
   MOVEMENT_BROADCAST_EVENTS,
   DISTANCE_BASELINE_EVENT,
   DISTANCE_EVENT,
@@ -38,8 +40,13 @@ import {
   planNextLetter,
 } from "@/lib/movement/movementState";
 import { MOVEMENT_PARAMS } from "@/lib/movement/params";
+import { nextSeq } from "@/lib/movement/phoneTracking";
 import { sendReadingBatches } from "@/lib/movement/readingBatches";
-import { joinSessionChannelWithBroadcasts, type SessionChannel } from "@/lib/session/channel";
+import {
+  joinSessionChannelWithBroadcasts,
+  type SessionChannel,
+  type SessionChannelWithBroadcasts,
+} from "@/lib/session/channel";
 
 export const CLOCK_TICK_MS = 250;
 export const SAVE_INTERVAL_MS = 2000;
@@ -157,12 +164,23 @@ export function createDisplayMovement(input: {
   let needsCheck = false;
   let checkStartedAtMs: number | null = null;
   let freshReadings = 0;
+  /**
+   * A check ended by CHECK_MAX_MS without the readings it waited for. If no
+   * reading has come since the baseline, the next letter pauses as lost
+   * instead of starting another check, so the check screen cannot repeat
+   * forever. Cleared by any found reading.
+   */
+  let checkTimedOut = false;
   let waitStartedAtMs: number | null = null;
   let observedMinMm: number | null = null;
   let observedMaxMm: number | null = null;
   let queue: DistanceReading[] = [];
   let flushChain: Promise<void> = Promise.resolve();
   let stopped = false;
+  let channel: SessionChannelWithBroadcasts | null = null;
+  /** What the phone was last told: true while a between-letters letter hides the marker. */
+  let markerHiddenSent = false;
+  let markerVisibilitySeq: number | null = null;
 
   const tickHandle = deps.setInterval(() => tick(), CLOCK_TICK_MS);
   const saveHandle = deps.setInterval(() => {
@@ -207,7 +225,31 @@ export function createDisplayMovement(input: {
   }
 
   function emitView(): void {
+    syncMarkerVisibility();
     hooks.viewChanged(view());
+  }
+
+  /**
+   * Tells the phone when the marker is hidden on purpose (a between-letters
+   * letter is up, no hold) and when it is back (the letter ended or was
+   * voided, a hold started, detection stopped). Sent on change only.
+   */
+  function syncMarkerVisibility(): void {
+    const hidden =
+      !stopped &&
+      unavailable === null &&
+      hold === null &&
+      letterOnScreen !== null &&
+      letterOnScreen.layout === "between-letters";
+    if (hidden === markerHiddenSent) {
+      return;
+    }
+    markerHiddenSent = hidden;
+    markerVisibilitySeq = nextSeq(markerVisibilitySeq, deps.nowMs());
+    const payload = markerVisibilityBroadcast({ visible: !hidden, seq: markerVisibilitySeq });
+    if (channel !== null) {
+      void channel.sendBroadcast(MARKER_VISIBILITY_EVENT, payload).catch(() => false);
+    }
   }
 
   function setHold(next: HoldScreen | null): void {
@@ -279,6 +321,7 @@ export function createDisplayMovement(input: {
     if (baseline === null || unavailable !== null || stopped) {
       return;
     }
+    checkTimedOut = false;
     const estimateMm = confirmedDistanceMm * reading.ratio;
     if (stepIndex === null) {
       queue.push({
@@ -368,6 +411,7 @@ export function createDisplayMovement(input: {
     if (hold === "check") {
       if (checkStartedAtMs !== null && nowMs - checkStartedAtMs >= CHECK_MAX_MS) {
         needsCheck = false;
+        checkTimedOut = true;
         endHold();
       }
       return;
@@ -400,6 +444,12 @@ export function createDisplayMovement(input: {
       const screen: HoldScreen = state.phase === "paused-lost" ? "paused-lost" : "paused-moved";
       setHold(screen);
       return { kind: "hold", screen };
+    }
+    if (state.lastReadingAtMs === null && checkTimedOut) {
+      // The check after the baseline timed out with no reading at all: lost, not another check.
+      state = { ...state, phase: "paused-lost", goodReadingsInRow: 0 };
+      pause("lost", null);
+      return { kind: "hold", screen: "paused-lost" };
     }
     if (needsCheck || state.lastReadingAtMs === null) {
       if (hold !== "check") {
@@ -491,7 +541,17 @@ export function createDisplayMovement(input: {
 
   return {
     joinChannel(sessionId, onNudge) {
-      return deps.joinChannel(sessionId, onNudge, MOVEMENT_BROADCAST_EVENTS, receive);
+      const joined = deps.joinChannel(sessionId, onNudge, MOVEMENT_BROADCAST_EVENTS, receive);
+      channel = joined;
+      return {
+        sendNudge: (kind) => joined.sendNudge(kind),
+        leave: () => {
+          if (channel === joined) {
+            channel = null;
+          }
+          joined.leave();
+        },
+      };
     },
     planLetter,
     setStepIndex(next) {
@@ -538,6 +598,8 @@ export function createDisplayMovement(input: {
         return;
       }
       stopped = true;
+      // A hidden marker is reported back before the channel goes quiet.
+      syncMarkerVisibility();
       deps.clearInterval(tickHandle);
       deps.clearInterval(saveHandle);
     },

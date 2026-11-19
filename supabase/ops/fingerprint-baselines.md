@@ -72,6 +72,15 @@ Each entry records the output of `supabase/ops/fingerprint.sql` after a verified
 - RPC surface fingerprint: 95ef606c838ebf8c8c35ce0995b95a41 (was 4174314eb9ad3ba7bbbf8cf2fa94e4df; changed because vcp_set_test_mode and vcp_submit_direction_response were added; every existing argument list and grant unchanged)
 - Table fingerprint: 1413fe68f0de26ab6f788c105d58b825 (was c9a26c7a6ec5def009a47167f889db5b; changed by the new columns sessions.test_mode, presentations.is_practice and landolt_direction, responses.response_direction and test_quality.test_mode, and the added or widened checks)
 
+## 20261107120000_vcp_distance_readings
+
+- Version: 20261107120000_vcp_distance_readings
+- Applied: 19 November 2026 (Dubai)
+- Preflight: SAFE TO APPLY. Verify: MIGRATION VERIFIED, 11 of 11. Smoke test: SMOKE TEST PASSED, 13 of 13
+- RPC surface fingerprint (fingerprint-rpc.sql): 48832bbd6960a336e7f3873d510a25bd (was 95ef606c838ebf8c8c35ce0995b95a41; changed because vcp_record_distance_readings was added)
+- Table fingerprint (fingerprint.sql): 61dd02e3b843a62789dd019865d2262f (was 1413fe68f0de26ab6f788c105d58b825; changed by the new column distance_events.captured_at)
+- Note: the only change is the new function public.vcp_record_distance_readings (EXECUTE for anon and postgres only) and the column vcp.distance_events.captured_at; table access lines unchanged.
+
 ## Parked
 
 - `vcp.calibrations.session_id` is a foreign key with no index. The only FK without one. Negligible at Phase A row counts.
